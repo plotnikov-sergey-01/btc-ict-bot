@@ -1,0 +1,96 @@
+symbol: BTC/USDT
+market: futures  # binance usdm perpetual
+
+timeframes:
+  htf: 1d
+  mtf: [4h, 1h]
+  ltf: 15m
+
+# MTF alignment: daily required; 4h and 1h must agree or be neutral
+mtf:
+  require_daily: true
+  require_4h: true
+  allow_1h_neutral: true
+
+structure:
+  pivot_left: 3
+  pivot_right: 3
+  signal_lookback_bars: 20  # CHoCH or BOS must occur within N LTF bars
+
+fvg:
+  min_size_atr_mult: 0.3   # min gap = ATR(14) * mult
+  atr_period: 14
+  entry_at_ce: false       # fill on any FVG touch (CE if reached, else edge)
+  require_unmitigated: true
+  limit_valid_bars: 8      # try 16 next as combo with fvg_touch
+
+risk:
+  min_rr: 2.0
+  sl_buffer_atr_mult: 0.3
+  sl_buffer_pct: 0.001     # 0.1% fallback buffer below swing
+
+liquidity:
+  enabled: true
+  equal_level_tolerance_pct: 0.0015
+  round_number_step: 1000    # $1000 steps for BTC
+  lookback_bars: 200
+
+funding:
+  enabled: true
+  extreme_positive: 0.0005   # 0.05% — cautious on longs
+  extreme_negative: -0.0005  # cautious on shorts
+  block_on_extreme: true    # true = skip trade; false = log only
+
+session:
+  enabled: true
+  windows:
+    - start_utc: "08:00"
+      end_utc: "14:00"     # EU open
+    - start_utc: "14:00"
+      end_utc: "22:00"     # US overlap
+  skip_weekends: true
+
+trade_management:
+  breakeven_at_rr: null
+  trailing_stop: true
+  trail_by: swing
+  trail_activate_at_rr: 1.5
+  extend_tp_on_trail: false
+  max_trades_per_day: 2
+
+# Entry quality filters (toggle individually for A/B tests)
+filters:
+  volatility:
+    enabled: false             # raises PF, cuts avgR/mo — keep off for 5R goal
+    lookback_days: 30
+    min_percentile: 20
+  displacement:
+    enabled: false
+    min_body_atr_mult: 1.2
+  premium_discount:
+    enabled: false
+  fibonacci_ote:
+    enabled: false
+    min_retrace: 0.62
+    max_retrace: 0.786
+
+goals:
+  min_r_per_month: 5.0         # tracked in metrics.json + monthly.csv
+
+backtest:
+  initial_balance: 10000
+  risk_per_trade_pct: 1.0    # % of balance risked per trade
+  commission_pct: 0.04       # taker fee approx (futures)
+  slippage_pct: 0.01
+  sample:
+    mode: full               # full | in_sample | out_of_sample
+    in_sample:
+      start: "2020-01-01"
+      end: "2022-12-31"
+    out_of_sample:
+      start: "2023-01-01"
+      end: null              # null = until end of loaded data
+
+data:
+  dir: data
+  start_date: "2020-01-01"

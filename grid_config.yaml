@@ -1,0 +1,41 @@
+# Slim grid: only 2–3 proven variants (fast A/B).
+# Run: python run_grid.py --sample out_of_sample
+# Or:  python run_compare_is_oos.py
+
+output_dir: results/grid
+
+# Explicit scenarios (not a full Cartesian product)
+scenarios:
+  - name: rr2_noBE_trail1.5
+    overrides:
+      risk.min_rr: 2.0
+      trade_management.breakeven_at_rr: null
+      trade_management.trailing_stop: true
+      trade_management.trail_by: swing
+      trade_management.trail_activate_at_rr: 1.5
+      trade_management.extend_tp_on_trail: false
+
+  - name: rr2_noBE_noTrail
+    overrides:
+      risk.min_rr: 2.0
+      trade_management.breakeven_at_rr: null
+      trade_management.trailing_stop: false
+
+  - name: rr2_noBE_trail2.0
+    overrides:
+      risk.min_rr: 2.0
+      trade_management.breakeven_at_rr: null
+      trade_management.trailing_stop: true
+      trade_management.trail_by: swing
+      trade_management.trail_activate_at_rr: 2.0
+      trade_management.extend_tp_on_trail: false
+
+# Shared baseline (always applied)
+baseline_overrides:
+  funding.block_on_extreme: true
+  fvg.limit_valid_bars: 8
+  fvg.entry_at_ce: false
+  filters.volatility.enabled: false
+  filters.displacement.enabled: false
+  filters.premium_discount.enabled: false
+  filters.fibonacci_ote.enabled: false

@@ -1,0 +1,6 @@
+ccxt>=4.0
+pandas>=2.0
+numpy>=1.24
+pyyaml>=6.0
+pyarrow>=14.0
+requests>=2.31

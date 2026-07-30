@@ -1,0 +1,15 @@
+.env
+data/live_state.json
+.venv/
+venv/
+__pycache__/
+*.pyc
+.pytest_cache/
+data/*.parquet
+data/*.csv
+data/*.json
+!data/.gitkeep
+results/*
+!results/.gitkeep
+*.egg-info/
+.DS_Store
