@@ -99,7 +99,6 @@ data:
   start_date: "2020-01-01"
 
 # Live runner: only last N days fed into generate_signals (disk cache stays full)
-# Prefer configs/ict_daily_on.yaml or configs/ict_daily_off.yaml for dual demo.
 live:
   bot_label: daily_on
   state_file: data/live_state_daily_on.json

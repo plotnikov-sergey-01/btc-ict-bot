@@ -59,25 +59,37 @@ TELEGRAM_CHAT_ID=...
 ## Local smoke test
 
 ```powershell
-python run_live.py --once
-python run_live.py --cycle-once --dry-run   # signals, no orders
-python run_live.py --cycle-once             # demo orders
-python run_live.py                          # 15m bar loop
+# Single (legacy config.yaml) or dual A/B:
+python run_live.py --config configs/ict_daily_on.yaml --env-file .env.daily_on --once
+python run_live.py --config configs/ict_daily_on.yaml --env-file .env.daily_on --cycle-once --dry-run
+python run_live.py --config configs/ict_daily_off.yaml --env-file .env.daily_off --cycle-once --dry-run
+python run_live.py --config configs/ict_daily_on.yaml --env-file .env.daily_on   # 15m loop
 ```
 
 Env: `LIVE_DRY_RUN=true` same as `--dry-run`.
 
-State: `data/live_state.json` (last bar + executed signal keys).
+State: `live.state_file` in config (defaults differ per bot: `data/live_state_daily_on.json` / `data_daily_off/...`).
 
 Expect ping: `Ping OK`. Cycle logs `Cycle result` with `action`: `none`, `trade`, `skip_open_position`, etc.
 
-**v1 limits:** market entry + static SL/TP; trailing from backtest not yet on live.
+**Speed:** candle fetch is incremental; `generate_signals` uses only last `live.signal_lookback_days` (default 90) from cache — full history stays on disk for backtests.
+
+## Dual demo (daily ON vs OFF)
+
+Two Binance demo API keys, two env files, two systemd units — see **[DEPLOY_DO.md](DEPLOY_DO.md)**.
+
+| Bot | Config | Env | `mtf.require_daily` |
+|-----|--------|-----|---------------------|
+| daily_on | `configs/ict_daily_on.yaml` | `.env.daily_on` | `true` |
+| daily_off | `configs/ict_daily_off.yaml` | `.env.daily_off` | `false` |
+
+Telegram messages are prefixed `[daily_on]` / `[daily_off]`. Candle dirs are separate (`data/` vs `data_daily_off/`) to avoid parquet write races.
 
 ## VPS (DigitalOcean)
 
-Пошагово: **[DEPLOY_DO.md](DEPLOY_DO.md)** (droplet, clone, `.env`, systemd).
+Пошагово: **[DEPLOY_DO.md](DEPLOY_DO.md)** (droplet, clone, два `.env`, два systemd).
 
-Кратко: Ubuntu 24.04, 1 GB RAM → clone → venv → `.env` → `systemctl enable --now btc-ict-bot`.
+Кратко: Ubuntu 24.04 → clone → venv → `.env.daily_on` + `.env.daily_off` → enable `btc-ict-daily-on` и `btc-ict-daily-off`.
 
 Первый цикл качает историю в `data/*.parquet`; дальше — инкрементально (секунды–десятки секунд).
 

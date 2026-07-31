@@ -8,7 +8,7 @@ from typing import Any
 import ccxt
 
 
-def load_env_file(path: str = ".env") -> None:
+def load_env_file(path: str = ".env", *, override: bool = False) -> None:
     """Minimal .env loader (no extra dependency)."""
     p = os.path.abspath(path)
     if not os.path.isfile(p):
@@ -21,7 +21,8 @@ def load_env_file(path: str = ".env") -> None:
             key, _, val = line.partition("=")
             key = key.strip()
             val = val.strip().strip('"').strip("'")
-            os.environ.setdefault(key, val)
+            if override or key not in os.environ:
+                os.environ[key] = val
 
 
 def _truthy(name: str, default: bool = False) -> bool:
@@ -31,13 +32,21 @@ def _truthy(name: str, default: bool = False) -> bool:
     return v.strip().lower() in ("1", "true", "yes", "on")
 
 
-def make_exchange(*, testnet: bool | None = None, demo: bool | None = None) -> ccxt.binanceusdm:
+def make_exchange(
+    *,
+    testnet: bool | None = None,
+    demo: bool | None = None,
+    env_file: str | None = None,
+) -> ccxt.binanceusdm:
     """
     Mainnet, Binance Demo (recommended paper), or legacy testnet.binancefuture.com URLs.
 
     CCXT no longer supports set_sandbox_mode() for USDM futures; use demo or manual test URLs.
     """
-    load_env_file()
+    if env_file:
+        load_env_file(env_file, override=True)
+    else:
+        load_env_file()
     demo = _truthy("BINANCE_USE_DEMO", default=False) if demo is None else demo
     testnet = _truthy("BINANCE_TESTNET", default=False) if testnet is None else testnet
 

@@ -1,0 +1,16 @@
+[Unit]
+Description=btc-ict-bot demo daily ON
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ict
+WorkingDirectory=/home/ict/btc-ict-bot
+EnvironmentFile=/home/ict/btc-ict-bot/.env.daily_on
+ExecStart=/home/ict/btc-ict-bot/.venv/bin/python run_live.py --config configs/ict_daily_on.yaml --env-file .env.daily_on
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target

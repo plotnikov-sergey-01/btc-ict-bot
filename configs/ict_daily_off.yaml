@@ -6,9 +6,9 @@ timeframes:
   mtf: [4h, 1h]
   ltf: 15m
 
-# MTF alignment: daily required; 4h and 1h must agree or be neutral
+# MTF alignment: daily OFF (A/B vs daily_on); 4h and 1h must agree or be neutral
 mtf:
-  require_daily: true
+  require_daily: false
   require_4h: true
   allow_1h_neutral: true
 
@@ -95,12 +95,11 @@ backtest:
       end: null              # null = until end of loaded data
 
 data:
-  dir: data
+  dir: data_daily_off
   start_date: "2020-01-01"
 
 # Live runner: only last N days fed into generate_signals (disk cache stays full)
-# Prefer configs/ict_daily_on.yaml or configs/ict_daily_off.yaml for dual demo.
 live:
-  bot_label: daily_on
-  state_file: data/live_state_daily_on.json
+  bot_label: daily_off
+  state_file: data_daily_off/live_state_daily_off.json
   signal_lookback_days: 90   # ~8–9k of 15m bars; enough for MTF/FVG/liquidity
