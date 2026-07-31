@@ -40,6 +40,10 @@ def liquidity_targets(
     lookback_bars: int,
     round_step: int,
     tolerance_pct: float,
+    *,
+    use_round_numbers: bool = True,
+    use_swing_levels: bool = True,
+    use_equal_levels: bool = True,
 ) -> list[float]:
     """Collect liquidity levels in trade direction from entry."""
     subset = df.loc[:ts].tail(lookback_bars)
@@ -49,9 +53,15 @@ def liquidity_targets(
     sl_prices = subset.loc[swing_low.reindex(subset.index, fill_value=False), "low"].values
 
     levels: list[float] = []
-    levels.extend(equal_levels(sh_prices, tolerance_pct))
-    levels.extend(equal_levels(sl_prices, tolerance_pct))
-    levels.extend(round_number_levels(entry, round_step))
+    if use_equal_levels:
+        levels.extend(equal_levels(sh_prices, tolerance_pct))
+        levels.extend(equal_levels(sl_prices, tolerance_pct))
+    if use_swing_levels:
+        # Single confirmed swings (what a discretionary trader usually aims for)
+        levels.extend(float(p) for p in sh_prices)
+        levels.extend(float(p) for p in sl_prices)
+    if use_round_numbers and round_step and round_step > 0:
+        levels.extend(round_number_levels(entry, round_step))
 
     if direction == 1:
         candidates = sorted({lv for lv in levels if lv > entry})

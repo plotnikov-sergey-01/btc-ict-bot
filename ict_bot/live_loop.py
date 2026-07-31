@@ -11,18 +11,26 @@ from pathlib import Path
 import pandas as pd
 
 from .config import load_config
-from .live_data import last_closed_bar, load_live_market_data
+from .live_data import last_closed_bar, load_live_market_data, slice_for_live_signals
 from .live_orders import has_open_position, open_signal_trade
 from .notify import send_telegram
 from .strategy import Signal, generate_signals
 
 log = logging.getLogger(__name__)
 
-STATE_PATH = Path("data/live_state.json")
+
+def _state_path(cfg: dict | None) -> Path:
+    live = (cfg or {}).get("live") or {}
+    return Path(live.get("state_file") or "data/live_state.json")
 
 
 def signal_key(sig: Signal) -> str:
     return f"{sig.timestamp.isoformat()}_{sig.direction}_{sig.entry:.4f}_{sig.stop:.4f}"
+
+
+def _bot_label(cfg: dict | None) -> str:
+    live = (cfg or {}).get("live") or {}
+    return str(live.get("bot_label") or "ict")
 
 
 def _fmt_signal(sig: Signal) -> str:
@@ -33,16 +41,18 @@ def _fmt_signal(sig: Signal) -> str:
     )
 
 
-def load_state() -> dict:
-    if not STATE_PATH.exists():
+def load_state(cfg: dict | None = None) -> dict:
+    path = _state_path(cfg)
+    if not path.exists():
         return {"executed": [], "last_bar": None, "missed": []}
-    with open(STATE_PATH, encoding="utf-8") as f:
+    with open(path, encoding="utf-8") as f:
         return json.load(f)
 
 
-def save_state(state: dict) -> None:
-    STATE_PATH.parent.mkdir(parents=True, exist_ok=True)
-    with open(STATE_PATH, "w", encoding="utf-8") as f:
+def save_state(state: dict, cfg: dict | None = None) -> None:
+    path = _state_path(cfg)
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with open(path, "w", encoding="utf-8") as f:
         json.dump(state, f, indent=2)
 
 
@@ -59,10 +69,11 @@ def signals_between(
     return [s for s in signals if after_ts < s.timestamp < before_ts]
 
 
-def notify_missed(sigs: list[Signal], reason: str) -> None:
+def notify_missed(sigs: list[Signal], reason: str, cfg: dict | None = None) -> None:
     if not sigs:
         return
-    lines = [f"⚠️ Missed entr{'y' if len(sigs) == 1 else 'ies'} ({reason})"]
+    label = _bot_label(cfg)
+    lines = [f"⚠️ [{label}] Missed entr{'y' if len(sigs) == 1 else 'ies'} ({reason})"]
     for s in sigs[:8]:
         lines.append(_fmt_signal(s))
     if len(sigs) > 8:
@@ -80,16 +91,29 @@ def run_strategy_cycle(
     dry_run: bool = False,
 ) -> dict:
     cfg = cfg or load_config()
+    label = _bot_label(cfg)
     df_15m, df_1h, df_4h, df_1d, funding = load_live_market_data(exchange, cfg, symbol)
     bar_ts = last_closed_bar(df_15m, 15)
 
-    state = load_state()
+    state = load_state(cfg)
     if state.get("last_bar") == bar_ts.isoformat():
-        log.info("Bar %s already processed", bar_ts)
-        return {"bar": bar_ts.isoformat(), "action": "skip_duplicate"}
+        log.info("[%s] Bar %s already processed", label, bar_ts)
+        return {"bar": bar_ts.isoformat(), "action": "skip_duplicate", "bot": label}
 
-    log.info("Running signals for closed bar %s", bar_ts)
+    lookback_days = int(cfg.get("live", {}).get("signal_lookback_days", 90))
+    df_15m, df_1h, df_4h, df_1d, funding = slice_for_live_signals(
+        df_15m, df_1h, df_4h, df_1d, funding, lookback_days
+    )
+
+    log.info("[%s] Running signals for closed bar %s", label, bar_ts)
+    t0 = time.perf_counter()
     all_signals = generate_signals(df_15m, df_1h, df_4h, df_1d, funding, cfg)
+    log.info(
+        "[%s] generate_signals done in %.1fs (%s signals in window)",
+        label,
+        time.perf_counter() - t0,
+        len(all_signals),
+    )
     bar_signals = signals_on_bar(all_signals, bar_ts)
     executed_set = set(state.get("executed", []))
     missed_set = set(state.get("missed", []))
@@ -107,11 +131,12 @@ def run_strategy_cycle(
             if signal_key(s) not in executed_set and signal_key(s) not in missed_set
         ]
         if gap_missed:
-            notify_missed(gap_missed, f"skipped bars after {prev_raw}")
+            notify_missed(gap_missed, f"skipped bars after {prev_raw}", cfg)
             for s in gap_missed:
                 missed_set.add(signal_key(s))
 
     result: dict = {
+        "bot": label,
         "bar": bar_ts.isoformat(),
         "signals_on_bar": len(bar_signals),
         "gap_missed": len(gap_missed),
@@ -121,18 +146,18 @@ def run_strategy_cycle(
     if not bar_signals:
         state["last_bar"] = bar_ts.isoformat()
         state["missed"] = sorted(missed_set)[-500:]
-        save_state(state)
+        save_state(state, cfg)
         return result
 
     if has_open_position(exchange, symbol):
-        log.info("Open position exists — skip new entries")
+        log.info("[%s] Open position exists — skip new entries", label)
         result["action"] = "skip_open_position"
-        notify_missed(bar_signals, "open position already exists")
+        notify_missed(bar_signals, "open position already exists", cfg)
         for s in bar_signals:
             missed_set.add(signal_key(s))
         state["last_bar"] = bar_ts.isoformat()
         state["missed"] = sorted(missed_set)[-500:]
-        save_state(state)
+        save_state(state, cfg)
         return result
 
     traded = False
@@ -148,15 +173,15 @@ def run_strategy_cycle(
             executed_set.add(key)
             traded = True
             msg = (
-                f"{'🧪 DRY' if dry_run else '📈'} {side} BTC\n"
+                f"{'🧪 DRY' if dry_run else '📈'} [{label}] {side} BTC\n"
                 f"entry≈{sig.entry:.2f} SL={sig.stop:.2f} TP={sig.take_profit:.2f}\n"
                 f"R:R={sig.rr:.2f} amt={trade.get('amount')}"
             )
             send_telegram(msg)
             break  # one trade per cycle (max 1 open position)
         except Exception as e:
-            log.exception("Trade failed")
-            send_telegram(f"🔴 Trade failed {side}\n{e}")
+            log.exception("[%s] Trade failed", label)
+            send_telegram(f"🔴 [{label}] Trade failed {side}\n{e}")
             result["action"] = "error"
             result["error"] = str(e)
             missed_set.add(key)
@@ -170,14 +195,14 @@ def run_strategy_cycle(
     ]
     if leftover and (traded or result["action"] == "none"):
         reason = "already took one trade this cycle" if traded else "not executed"
-        notify_missed(leftover, reason)
+        notify_missed(leftover, reason, cfg)
         for s in leftover:
             missed_set.add(signal_key(s))
 
     state["executed"] = sorted(executed_set)[-500:]
     state["missed"] = sorted(missed_set)[-500:]
     state["last_bar"] = bar_ts.isoformat()
-    save_state(state)
+    save_state(state, cfg)
     return result
 
 

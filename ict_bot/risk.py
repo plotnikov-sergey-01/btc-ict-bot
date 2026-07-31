@@ -86,8 +86,11 @@ def build_trade_setup(
             struct["pivot_left"],
             struct["pivot_right"],
             liq["lookback_bars"],
-            liq["round_number_step"],
+            int(liq.get("round_number_step") or 0),
             liq["equal_level_tolerance_pct"],
+            use_round_numbers=bool(liq.get("use_round_numbers", True)),
+            use_swing_levels=bool(liq.get("use_swing_levels", False)),
+            use_equal_levels=bool(liq.get("use_equal_levels", True)),
         )
 
     min_rr = risk["min_rr"]

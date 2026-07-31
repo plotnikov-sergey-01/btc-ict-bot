@@ -184,3 +184,43 @@ def last_closed_bar(df: pd.DataFrame, timeframe_minutes: int = 15) -> pd.Timesta
             raise RuntimeError("only forming bar available")
         return df.index[-2]
     return last_ts
+
+
+def slice_for_live_signals(
+    df_15m: pd.DataFrame,
+    df_1h: pd.DataFrame,
+    df_4h: pd.DataFrame,
+    df_1d: pd.DataFrame,
+    funding: pd.DataFrame | None,
+    lookback_days: int,
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame, pd.DataFrame | None]:
+    """
+    Truncate frames to a recent window for fast generate_signals.
+    Disk parquet cache is unchanged; only in-memory slice for the strategy pass.
+    """
+    if lookback_days <= 0 or df_15m.empty:
+        return df_15m, df_1h, df_4h, df_1d, funding
+
+    end = df_15m.index[-1]
+    start = end - pd.Timedelta(days=lookback_days)
+    s15 = df_15m.loc[df_15m.index >= start]
+    s1h = df_1h.loc[df_1h.index >= start]
+    s4h = df_4h.loc[df_4h.index >= start]
+    # Daily needs extra history for swing bias; keep ~2× lookback or min 180d
+    day_start = end - pd.Timedelta(days=max(lookback_days * 2, 180))
+    s1d = df_1d.loc[df_1d.index >= day_start]
+    fund = None
+    if funding is not None and not funding.empty:
+        fund = funding.loc[funding.index >= start]
+
+    log.info(
+        "Live signal window: %s → %s | 15m=%s 1h=%s 4h=%s 1d=%s (lookback=%sd)",
+        s15.index[0] if not s15.empty else "?",
+        end,
+        len(s15),
+        len(s1h),
+        len(s4h),
+        len(s1d),
+        lookback_days,
+    )
+    return s15, s1h, s4h, s1d, fund
