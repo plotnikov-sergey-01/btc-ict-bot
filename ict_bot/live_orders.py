@@ -10,6 +10,10 @@ from .strategy import Signal
 log = logging.getLogger(__name__)
 
 
+class EntryDeviationError(RuntimeError):
+    """Live price moved too far from signal entry (adverse slippage)."""
+
+
 def fetch_usdt_balance(exchange) -> float:
     bal = exchange.fetch_balance()
     usdt = bal.get("USDT") or {}
@@ -50,6 +54,60 @@ def _round_price(exchange, symbol: str, price: float) -> str:
     return exchange.price_to_precision(symbol, price)
 
 
+def fetch_last_price(exchange, symbol: str) -> float:
+    ticker = exchange.fetch_ticker(symbol)
+    mark = ticker.get("mark") or (ticker.get("info") or {}).get("markPrice")
+    last = ticker.get("last") or ticker.get("close") or mark
+    if last is None:
+        raise RuntimeError(f"no ticker price for {symbol}")
+    return float(last)
+
+
+def adverse_deviation_pct(direction: int, signal_entry: float, live: float) -> float:
+    """How much worse live is vs signal, in percent (0 if price moved in our favor)."""
+    if signal_entry <= 0:
+        return 0.0
+    if direction == 1:
+        return max(0.0, (live - signal_entry) / signal_entry * 100.0)
+    return max(0.0, (signal_entry - live) / signal_entry * 100.0)
+
+
+def cancel_open_orders(exchange, symbol: str) -> int:
+    """Cancel all working orders for symbol. Returns number cancelled (best-effort)."""
+    try:
+        open_orders = exchange.fetch_open_orders(symbol)
+    except Exception as e:
+        log.warning("fetch_open_orders failed: %s", e)
+        try:
+            exchange.cancel_all_orders(symbol)
+            return -1
+        except Exception as e2:
+            log.warning("cancel_all_orders failed: %s", e2)
+            return 0
+    n = 0
+    for o in open_orders or []:
+        oid = o.get("id")
+        if not oid:
+            continue
+        try:
+            exchange.cancel_order(oid, symbol)
+            n += 1
+            log.info("Cancelled leftover order %s type=%s", oid, o.get("type"))
+        except Exception as e:
+            log.warning("cancel_order %s failed: %s", oid, e)
+    return n
+
+
+def sweep_orphan_orders(exchange, symbol: str) -> int:
+    """If flat, cancel leftover SL/TP (Binance does not OCO-cancel the sibling)."""
+    if has_open_position(exchange, symbol):
+        return 0
+    n = cancel_open_orders(exchange, symbol)
+    if n:
+        log.info("Swept %s leftover order(s) while flat", n)
+    return n if n >= 0 else 0
+
+
 def open_signal_trade(
     exchange,
     symbol: str,
@@ -61,7 +119,21 @@ def open_signal_trade(
     """
     Market entry + STOP_MARKET + TAKE_PROFIT_MARKET (reduce-only).
     Matches backtest entry at signal bar; trailing deferred to later version.
+
+    Skips if live price has moved adversely vs signal entry by more than
+    live.max_entry_deviation_pct (default 0.25% ≈ $160 at 64k).
     """
+    live_px = fetch_last_price(exchange, symbol)
+    max_dev = float((cfg.get("live") or {}).get("max_entry_deviation_pct", 0.25))
+    adverse = adverse_deviation_pct(sig.direction, sig.entry, live_px)
+    abs_move = abs(live_px - sig.entry)
+
+    if max_dev > 0 and adverse > max_dev:
+        raise EntryDeviationError(
+            f"live={live_px:.2f} vs signal={sig.entry:.2f} "
+            f"adverse={adverse:.3f}% (${abs_move:.0f}) > max {max_dev}%"
+        )
+
     balance = fetch_usdt_balance(exchange)
     risk_pct = float(cfg["backtest"]["risk_per_trade_pct"])
     amount = calc_amount(exchange, symbol, balance, risk_pct, sig.entry, sig.stop)
@@ -77,6 +149,9 @@ def open_signal_trade(
         "side": side,
         "amount": amount,
         "entry": sig.entry,
+        "live_price": live_px,
+        "adverse_pct": round(adverse, 4),
+        "slip_usd": round(abs_move, 2),
         "stop": stop_p,
         "take_profit": tp_p,
         "rr": sig.rr,
@@ -87,13 +162,23 @@ def open_signal_trade(
     if dry_run:
         return {"dry_run": True, **plan}
 
+    # Old SL/TP stay working after the sibling fills — cancel before a new ticket
+    sweep_orphan_orders(exchange, symbol)
+
     try:
         exchange.set_leverage(10, symbol)
     except Exception as e:
         log.warning("set_leverage: %s", e)
 
     entry_order = exchange.create_order(symbol, "market", side, amount)
-    log.info("Entry order: %s", entry_order.get("id"))
+    fill = float(
+        entry_order.get("average")
+        or entry_order.get("price")
+        or live_px
+    )
+    log.info("Entry order: %s fill≈%s", entry_order.get("id"), fill)
+    plan["fill"] = fill
+    plan["fill_slip_usd"] = round(abs(fill - sig.entry), 2)
 
     sl = exchange.create_order(
         symbol,

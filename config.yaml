@@ -104,3 +104,4 @@ live:
   bot_label: daily_on
   state_file: data/live_state_daily_on.json
   signal_lookback_days: 90   # ~8–9k of 15m bars; enough for MTF/FVG/liquidity
+  max_entry_deviation_pct: 0.25  # skip if live moved against us >0.25% vs signal (~$160 at 64k)

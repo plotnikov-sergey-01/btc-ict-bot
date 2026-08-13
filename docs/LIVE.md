@@ -70,7 +70,11 @@ Env: `LIVE_DRY_RUN=true` same as `--dry-run`.
 
 State: `live.state_file` in config (defaults differ per bot: `data/live_state_daily_on.json` / `data_daily_off/...`).
 
-Expect ping: `Ping OK`. Cycle logs `Cycle result` with `action`: `none`, `trade`, `skip_open_position`, etc.
+Expect ping: `Ping OK`. Cycle logs `Cycle result` with `action`: `none`, `trade`, `skip_open_position`, `skip_deviation`, etc.
+
+**Leftover SL/TP:** Binance USDM does not cancel the sibling when TP or SL fills. The bot sweeps open orders whenever the position is flat (every ~30s while waiting, and at each 15m cycle).
+
+**Entry slippage:** market fill vs signal price. If live moved *against* the trade by more than `live.max_entry_deviation_pct` (default 0.25%), the entry is skipped (`Missed … price moved`). Favorable moves are allowed.
 
 **Speed:** candle fetch is incremental; `generate_signals` uses only last `live.signal_lookback_days` (default 90) from cache — full history stays on disk for backtests.
 

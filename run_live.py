@@ -18,7 +18,7 @@ from datetime import datetime, timezone
 
 from ict_bot.config import load_config
 from ict_bot.exchange_client import _truthy, load_env_file, make_exchange, ping
-from ict_bot.live_loop import run_strategy_cycle, sleep_until_next_15m_close
+from ict_bot.live_loop import run_strategy_cycle, sleep_until_next_15m_with_sweep
 from ict_bot.notify import TelegramHandler, send_telegram, telegram_configured
 
 log = logging.getLogger("ict_live")
@@ -112,7 +112,9 @@ def main() -> int:
             return 0
 
         while True:
-            sleep_until_next_15m_close()
+            sleep_until_next_15m_with_sweep(
+                exchange, args.symbol, cfg, dry_run=dry_run
+            )
             try:
                 do_cycle()
             except Exception as e:

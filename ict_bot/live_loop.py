@@ -12,7 +12,12 @@ import pandas as pd
 
 from .config import load_config
 from .live_data import last_closed_bar, load_live_market_data, slice_for_live_signals
-from .live_orders import has_open_position, open_signal_trade
+from .live_orders import (
+    EntryDeviationError,
+    has_open_position,
+    open_signal_trade,
+    sweep_orphan_orders,
+)
 from .notify import send_telegram
 from .strategy import Signal, generate_signals
 
@@ -92,6 +97,12 @@ def run_strategy_cycle(
 ) -> dict:
     cfg = cfg or load_config()
     label = _bot_label(cfg)
+    if not dry_run:
+        n_orphans = sweep_orphan_orders(exchange, symbol)
+        if n_orphans:
+            send_telegram(
+                f"🧹 [{label}] Cancelled {n_orphans} leftover order(s) (position flat)"
+            )
     df_15m, df_1h, df_4h, df_1d, funding = load_live_market_data(exchange, cfg, symbol)
     bar_ts = last_closed_bar(df_15m, 15)
 
@@ -172,13 +183,23 @@ def run_strategy_cycle(
             result["trade"] = trade
             executed_set.add(key)
             traded = True
+            fill = trade.get("fill") or trade.get("live_price") or sig.entry
+            slip = trade.get("fill_slip_usd", trade.get("slip_usd", 0))
             msg = (
                 f"{'🧪 DRY' if dry_run else '📈'} [{label}] {side} BTC\n"
-                f"entry≈{sig.entry:.2f} SL={sig.stop:.2f} TP={sig.take_profit:.2f}\n"
+                f"signal≈{sig.entry:.2f} fill≈{float(fill):.2f} (Δ${slip})\n"
+                f"SL={sig.stop:.2f} TP={sig.take_profit:.2f}\n"
                 f"R:R={sig.rr:.2f} amt={trade.get('amount')}"
             )
             send_telegram(msg)
             break  # one trade per cycle (max 1 open position)
+        except EntryDeviationError as e:
+            log.warning("[%s] Skip entry (price moved): %s", label, e)
+            send_telegram(f"⚠️ [{label}] Missed {side} (price moved)\n{e}")
+            result["action"] = "skip_deviation"
+            result["error"] = str(e)
+            missed_set.add(key)
+            break
         except Exception as e:
             log.exception("[%s] Trade failed", label)
             send_telegram(f"🔴 [{label}] Trade failed {side}\n{e}")
@@ -224,3 +245,34 @@ def sleep_until_next_15m_close(buffer_sec: int = 5) -> None:
     wait = seconds_until_next_15m_close(buffer_sec)
     log.info("Sleep %.0fs until next 15m close + buffer", wait)
     time.sleep(wait)
+
+
+def sleep_until_next_15m_with_sweep(
+    exchange,
+    symbol: str,
+    cfg: dict | None = None,
+    *,
+    dry_run: bool = False,
+    poll_sec: int = 30,
+    buffer_sec: int = 5,
+) -> None:
+    """Wait for next 15m close; while waiting, cancel leftover SL/TP if flat."""
+    label = _bot_label(cfg)
+    wait = seconds_until_next_15m_close(buffer_sec)
+    log.info("Sleep %.0fs until next 15m close (sweep leftovers every %ss)", wait, poll_sec)
+    deadline = time.monotonic() + wait
+    while True:
+        remaining = deadline - time.monotonic()
+        if remaining <= 0:
+            return
+        time.sleep(min(poll_sec, remaining))
+        if dry_run or remaining <= poll_sec:
+            continue
+        try:
+            n = sweep_orphan_orders(exchange, symbol)
+            if n:
+                send_telegram(
+                    f"🧹 [{label}] Cancelled {n} leftover order(s) (position flat)"
+                )
+        except Exception:
+            log.exception("[%s] Orphan-order sweep failed", label)
