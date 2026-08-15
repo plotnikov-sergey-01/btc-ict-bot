@@ -98,11 +98,15 @@ def run_strategy_cycle(
     cfg = cfg or load_config()
     label = _bot_label(cfg)
     if not dry_run:
-        n_orphans = sweep_orphan_orders(exchange, symbol)
-        if n_orphans:
-            send_telegram(
-                f"🧹 [{label}] Cancelled {n_orphans} leftover order(s) (position flat)"
-            )
+        try:
+            n_orphans = sweep_orphan_orders(exchange, symbol)
+            if n_orphans:
+                send_telegram(
+                    f"🧹 [{label}] Cancelled {n_orphans} leftover order(s) (position flat)"
+                )
+        except Exception as e:
+            # Network blips already handled inside sweep; this is a safety net
+            log.warning("[%s] Orphan sweep at cycle start failed: %s", label, e)
     df_15m, df_1h, df_4h, df_1d, funding = load_live_market_data(exchange, cfg, symbol)
     bar_ts = last_closed_bar(df_15m, 15)
 
@@ -274,5 +278,10 @@ def sleep_until_next_15m_with_sweep(
                 send_telegram(
                     f"🧹 [{label}] Cancelled {n} leftover order(s) (position flat)"
                 )
-        except Exception:
-            log.exception("[%s] Orphan-order sweep failed", label)
+        except Exception as e:
+            # WARNING only — ERROR goes to Telegram with full traceback spam
+            log.warning(
+                "[%s] Orphan-order sweep failed (retry next poll): %s",
+                label,
+                e,
+            )

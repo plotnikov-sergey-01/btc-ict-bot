@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import time
 from typing import Any
 
 from .strategy import Signal
@@ -12,6 +13,27 @@ log = logging.getLogger(__name__)
 
 class EntryDeviationError(RuntimeError):
     """Live price moved too far from signal entry (adverse slippage)."""
+
+
+def _is_transient_network(exc: BaseException) -> bool:
+    name = type(exc).__name__
+    msg = str(exc).lower()
+    needles = (
+        "remotedisconnected",
+        "connection aborted",
+        "connection reset",
+        "timed out",
+        "timeout",
+        "temporarily unavailable",
+        "network",
+        "broken pipe",
+        "connectionerror",
+        "requesttimeout",
+        "exchange not available",
+    )
+    if any(n in name.lower() for n in ("network", "timeout", "connection", "request")):
+        return True
+    return any(n in msg for n in needles)
 
 
 def fetch_usdt_balance(exchange) -> float:
@@ -98,14 +120,41 @@ def cancel_open_orders(exchange, symbol: str) -> int:
     return n
 
 
-def sweep_orphan_orders(exchange, symbol: str) -> int:
-    """If flat, cancel leftover SL/TP (Binance does not OCO-cancel the sibling)."""
-    if has_open_position(exchange, symbol):
-        return 0
-    n = cancel_open_orders(exchange, symbol)
-    if n:
-        log.info("Swept %s leftover order(s) while flat", n)
-    return n if n >= 0 else 0
+def sweep_orphan_orders(exchange, symbol: str, *, retries: int = 2) -> int:
+    """
+    If flat, cancel leftover SL/TP (Binance does not OCO-cancel the sibling).
+
+    On transient network errors: retry a few times, then return 0 without
+    cancelling (never cancel if we could not confirm the position is flat).
+    """
+    last_err: BaseException | None = None
+    for attempt in range(retries + 1):
+        try:
+            if has_open_position(exchange, symbol):
+                return 0
+            n = cancel_open_orders(exchange, symbol)
+            if n:
+                log.info("Swept %s leftover order(s) while flat", n)
+            return n if n >= 0 else 0
+        except Exception as e:
+            last_err = e
+            if attempt < retries and _is_transient_network(e):
+                delay = 1.5 * (attempt + 1)
+                log.warning(
+                    "Orphan sweep network blip (attempt %s/%s), retry in %.1fs: %s",
+                    attempt + 1,
+                    retries + 1,
+                    delay,
+                    e,
+                )
+                time.sleep(delay)
+                continue
+            # Non-transient or retries exhausted — do not cancel blindly
+            log.warning("Orphan sweep skipped: %s", e)
+            return 0
+    if last_err:
+        log.warning("Orphan sweep skipped: %s", last_err)
+    return 0
 
 
 def open_signal_trade(
