@@ -72,28 +72,29 @@ State: `live.state_file` in config (defaults differ per bot: `data/live_state_da
 
 Expect ping: `Ping OK`. Cycle logs `Cycle result` with `action`: `none`, `trade`, `skip_open_position`, `skip_deviation`, etc.
 
-**Leftover SL/TP:** Binance USDM does not cancel the sibling when TP or SL fills. The bot sweeps open orders whenever the position is flat (every ~30s while waiting, and at each 15m cycle).
+**Leftover SL/TP:** Binance USDM does not OCO-cancel the sibling, and STOP/TP are **algo** orders. The bot cancels both regular and algo open orders when flat (`cancel_all_orders` + `stop=True`), every ~30s while waiting and at each 15m cycle.
+
+**Live trailing:** on each new 15m bar with an open position, swing trail after `trail_activate_at_rr` (default 1.5R) — same idea as backtest. Telegram: `🪢 Trail SL old → new`.
 
 **Entry slippage:** market fill vs signal price. If live moved *against* the trade by more than `live.max_entry_deviation_pct` (default 0.25%), the entry is skipped (`Missed … price moved`). Favorable moves are allowed.
 
 **Speed:** candle fetch is incremental; `generate_signals` uses only last `live.signal_lookback_days` (default 90) from cache — full history stays on disk for backtests.
 
-## Dual demo (daily ON vs OFF)
+## Demo (daily ON)
 
-Two Binance demo API keys, two env files, two systemd units — see **[DEPLOY_DO.md](DEPLOY_DO.md)**.
+Prod demo runs **daily_on only** — see **[DEPLOY_DO.md](DEPLOY_DO.md)**.
 
 | Bot | Config | Env | `mtf.require_daily` |
 |-----|--------|-----|---------------------|
 | daily_on | `configs/ict_daily_on.yaml` | `.env.daily_on` | `true` |
-| daily_off | `configs/ict_daily_off.yaml` | `.env.daily_off` | `false` |
 
-Telegram messages are prefixed `[daily_on]` / `[daily_off]`. Candle dirs are separate (`data/` vs `data_daily_off/`) to avoid parquet write races.
+`configs/ict_daily_off.yaml` remains for offline A/B research.
 
 ## VPS (DigitalOcean)
 
-Пошагово: **[DEPLOY_DO.md](DEPLOY_DO.md)** (droplet, clone, два `.env`, два systemd).
+Пошагово: **[DEPLOY_DO.md](DEPLOY_DO.md)** (droplet, clone, `.env.daily_on`, systemd).
 
-Кратко: Ubuntu 24.04 → clone → venv → `.env.daily_on` + `.env.daily_off` → enable `btc-ict-daily-on` и `btc-ict-daily-off`.
+Кратко: Ubuntu 24.04 → clone → venv → `.env.daily_on` → `systemctl enable --now btc-ict-daily-on` (disable `btc-ict-daily-off` if it was running).
 
 Первый цикл качает историю в `data/*.parquet`; дальше — инкрементально (секунды–десятки секунд).
 
@@ -130,4 +131,4 @@ Tips:
 
 ## Current code status
 
-`run_live.py`: 15m bar loop → `generate_signals` → market entry + SL/TP. Trailing from backtest not yet on live. Incremental OHLCV cache in `data/*.parquet`.
+`run_live.py`: 15m bar loop → manage trail if position open → `generate_signals` → market entry + SL/TP. Orphan algo+regular order sweep when flat. Incremental OHLCV cache in `data/*.parquet`.

@@ -18,6 +18,7 @@ from .live_orders import (
     open_signal_trade,
     sweep_orphan_orders,
 )
+from .live_trail import manage_live_trailing
 from .notify import send_telegram
 from .strategy import Signal, generate_signals
 
@@ -49,9 +50,11 @@ def _fmt_signal(sig: Signal) -> str:
 def load_state(cfg: dict | None = None) -> dict:
     path = _state_path(cfg)
     if not path.exists():
-        return {"executed": [], "last_bar": None, "missed": []}
+        return {"executed": [], "last_bar": None, "missed": [], "open_trade": None}
     with open(path, encoding="utf-8") as f:
-        return json.load(f)
+        data = json.load(f)
+    data.setdefault("open_trade", None)
+    return data
 
 
 def save_state(state: dict, cfg: dict | None = None) -> None:
@@ -88,6 +91,23 @@ def notify_missed(sigs: list[Signal], reason: str, cfg: dict | None = None) -> N
     send_telegram(msg)
 
 
+def _notify_sweep(label: str, detail: dict) -> None:
+    cancelled = int(detail.get("cancelled_est") or 0)
+    before = detail.get("before") or {}
+    after = detail.get("after") or {}
+    errors = detail.get("errors") or []
+    if cancelled > 0:
+        send_telegram(
+            f"🧹 [{label}] Cancelled ≈{cancelled} leftover order(s) "
+            f"(regular+algo; before={before.get('total')} after={after.get('total')})"
+        )
+    elif before.get("total", 0) > 0 and after.get("total", 0) > 0:
+        send_telegram(
+            f"⚠️ [{label}] Flat but {after.get('total')} open order(s) remain "
+            f"(before={before} after={after} errs={errors[:2]})"
+        )
+
+
 def run_strategy_cycle(
     exchange,
     symbol: str,
@@ -97,21 +117,30 @@ def run_strategy_cycle(
 ) -> dict:
     cfg = cfg or load_config()
     label = _bot_label(cfg)
+    state = load_state(cfg)
+
     if not dry_run:
         try:
-            n_orphans = sweep_orphan_orders(exchange, symbol)
-            if n_orphans:
-                send_telegram(
-                    f"🧹 [{label}] Cancelled {n_orphans} leftover order(s) (position flat)"
-                )
+            detail = sweep_orphan_orders(exchange, symbol)
+            if detail.get("flat") and (
+                detail.get("cancelled_est") or (detail.get("before") or {}).get("total")
+            ):
+                _notify_sweep(label, detail)
+            if detail.get("flat") and not has_open_position(exchange, symbol):
+                if state.get("open_trade"):
+                    log.info("[%s] Position flat — clearing open_trade state", label)
+                    state["open_trade"] = None
+                    save_state(state, cfg)
         except Exception as e:
-            # Network blips already handled inside sweep; this is a safety net
             log.warning("[%s] Orphan sweep at cycle start failed: %s", label, e)
+
     df_15m, df_1h, df_4h, df_1d, funding = load_live_market_data(exchange, cfg, symbol)
     bar_ts = last_closed_bar(df_15m, 15)
 
     state = load_state(cfg)
     if state.get("last_bar") == bar_ts.isoformat():
+        # Still manage trail on duplicate skip? No — wait for next bar.
+        # But if we already processed bar, trailing for THIS bar was done.
         log.info("[%s] Bar %s already processed", label, bar_ts)
         return {"bar": bar_ts.isoformat(), "action": "skip_duplicate", "bot": label}
 
@@ -119,6 +148,30 @@ def run_strategy_cycle(
     df_15m, df_1h, df_4h, df_1d, funding = slice_for_live_signals(
         df_15m, df_1h, df_4h, df_1d, funding, lookback_days
     )
+
+    result: dict = {
+        "bot": label,
+        "bar": bar_ts.isoformat(),
+        "action": "none",
+    }
+
+    # --- Manage open position: swing trail on each new 15m bar ---
+    if has_open_position(exchange, symbol):
+        open_trade = state.get("open_trade")
+        trail = manage_live_trailing(
+            exchange, symbol, df_15m, cfg, open_trade, dry_run=dry_run
+        )
+        result["trail"] = trail
+        if open_trade is not None:
+            state["open_trade"] = open_trade
+        if trail.get("action") == "trail_moved":
+            send_telegram(
+                f"🪢 [{label}] Trail SL {trail['old_stop']:.2f} → {trail['new_stop']:.2f}\n"
+                f"MFE≈{trail.get('mfe_rr')}R @ {bar_ts.isoformat()}"
+            )
+        elif trail.get("action") == "trail_error":
+            send_telegram(f"🔴 [{label}] Trail failed\n{trail.get('error')}")
+        save_state(state, cfg)
 
     log.info("[%s] Running signals for closed bar %s", label, bar_ts)
     t0 = time.perf_counter()
@@ -150,13 +203,8 @@ def run_strategy_cycle(
             for s in gap_missed:
                 missed_set.add(signal_key(s))
 
-    result: dict = {
-        "bot": label,
-        "bar": bar_ts.isoformat(),
-        "signals_on_bar": len(bar_signals),
-        "gap_missed": len(gap_missed),
-        "action": "none",
-    }
+    result["signals_on_bar"] = len(bar_signals)
+    result["gap_missed"] = len(gap_missed)
 
     if not bar_signals:
         state["last_bar"] = bar_ts.isoformat()
@@ -187,6 +235,21 @@ def run_strategy_cycle(
             result["trade"] = trade
             executed_set.add(key)
             traded = True
+            if not dry_run:
+                state["open_trade"] = {
+                    "direction": sig.direction,
+                    "entry": sig.entry,
+                    "fill": trade.get("fill"),
+                    "initial_stop": trade.get("initial_stop", sig.stop),
+                    "stop": float(trade.get("stop") or sig.stop),
+                    "take_profit": float(trade.get("take_profit") or sig.take_profit),
+                    "amount": trade.get("amount"),
+                    "rr": sig.rr,
+                    "trail_active": False,
+                    "stop_order_id": trade.get("stop_order_id"),
+                    "tp_order_id": trade.get("tp_order_id"),
+                    "opened_bar": bar_ts.isoformat(),
+                }
             fill = trade.get("fill") or trade.get("live_price") or sig.entry
             slip = trade.get("fill_slip_usd", trade.get("slip_usd", 0))
             msg = (
@@ -273,13 +336,19 @@ def sleep_until_next_15m_with_sweep(
         if dry_run or remaining <= poll_sec:
             continue
         try:
-            n = sweep_orphan_orders(exchange, symbol)
-            if n:
-                send_telegram(
-                    f"🧹 [{label}] Cancelled {n} leftover order(s) (position flat)"
-                )
+            detail = sweep_orphan_orders(exchange, symbol)
+            if detail.get("flat") and (
+                detail.get("cancelled_est")
+                or (detail.get("before") or {}).get("total")
+            ):
+                _notify_sweep(label, detail)
+            # Clear stale open_trade if we became flat between bars
+            if detail.get("flat"):
+                state = load_state(cfg)
+                if state.get("open_trade") and not has_open_position(exchange, symbol):
+                    state["open_trade"] = None
+                    save_state(state, cfg)
         except Exception as e:
-            # WARNING only — ERROR goes to Telegram with full traceback spam
             log.warning(
                 "[%s] Orphan-order sweep failed (retry next poll): %s",
                 label,

@@ -44,16 +44,34 @@ def fetch_usdt_balance(exchange) -> float:
     return float(bal.get("free", {}).get("USDT", 0) or 0)
 
 
-def has_open_position(exchange, symbol: str) -> bool:
+def get_open_position(exchange, symbol: str) -> dict[str, Any] | None:
+    """Return first non-zero position for symbol, or None if flat."""
     positions = exchange.fetch_positions([symbol])
     for p in positions:
-        contracts = float(p.get("contracts") or p.get("contractSize") or 0)
+        contracts = float(p.get("contracts") or 0)
         if contracts == 0:
             amt = float(p.get("info", {}).get("positionAmt", 0) or 0)
             contracts = abs(amt)
-        if contracts > 0:
-            return True
-    return False
+        if contracts <= 0:
+            continue
+        side = (p.get("side") or "").lower()
+        info_amt = float(p.get("info", {}).get("positionAmt", 0) or 0)
+        if not side:
+            side = "long" if info_amt > 0 else "short"
+        entry = float(p.get("entryPrice") or p.get("info", {}).get("entryPrice") or 0)
+        return {
+            "side": side,
+            "direction": 1 if side == "long" else -1,
+            "contracts": contracts,
+            "entry": entry,
+            "unrealized": float(p.get("unrealizedPnl") or 0),
+            "raw": p,
+        }
+    return None
+
+
+def has_open_position(exchange, symbol: str) -> bool:
+    return get_open_position(exchange, symbol) is not None
 
 
 def calc_amount(
@@ -94,48 +112,104 @@ def adverse_deviation_pct(direction: int, signal_entry: float, live: float) -> f
     return max(0.0, (signal_entry - live) / signal_entry * 100.0)
 
 
-def cancel_open_orders(exchange, symbol: str) -> int:
-    """Cancel all working orders for symbol. Returns number cancelled (best-effort)."""
+def _market_id(exchange, symbol: str) -> str:
+    market = exchange.market(symbol)
+    return str(market["id"])
+
+
+def count_open_orders(exchange, symbol: str) -> dict[str, int]:
+    """Count regular + algo (conditional) open orders for diagnostics."""
+    regular = 0
+    algo = 0
     try:
-        open_orders = exchange.fetch_open_orders(symbol)
+        regular = len(exchange.fetch_open_orders(symbol) or [])
     except Exception as e:
-        log.warning("fetch_open_orders failed: %s", e)
-        try:
-            exchange.cancel_all_orders(symbol)
-            return -1
-        except Exception as e2:
-            log.warning("cancel_all_orders failed: %s", e2)
-            return 0
-    n = 0
-    for o in open_orders or []:
-        oid = o.get("id")
-        if not oid:
-            continue
-        try:
-            exchange.cancel_order(oid, symbol)
-            n += 1
-            log.info("Cancelled leftover order %s type=%s", oid, o.get("type"))
-        except Exception as e:
-            log.warning("cancel_order %s failed: %s", oid, e)
-    return n
+        log.warning("fetch_open_orders count failed: %s", e)
+    try:
+        mid = _market_id(exchange, symbol)
+        algo_resp = exchange.fapiPrivateGetOpenAlgoOrders({"symbol": mid})
+        if isinstance(algo_resp, list):
+            algo = len(algo_resp)
+        elif isinstance(algo_resp, dict):
+            orders = algo_resp.get("orders") or algo_resp.get("data") or []
+            algo = len(orders) if isinstance(orders, list) else 0
+    except Exception as e:
+        log.warning("fetch open algo orders count failed: %s", e)
+    return {"regular": regular, "algo": algo, "total": regular + algo}
 
 
-def sweep_orphan_orders(exchange, symbol: str, *, retries: int = 2) -> int:
+def cancel_all_working_orders(exchange, symbol: str) -> dict[str, Any]:
     """
-    If flat, cancel leftover SL/TP (Binance does not OCO-cancel the sibling).
+    Cancel BOTH regular and algo/conditional orders.
 
-    On transient network errors: retry a few times, then return 0 without
-    cancelling (never cancel if we could not confirm the position is flat).
+    Binance USDM places STOP_MARKET / TAKE_PROFIT_MARKET as algo orders.
+    cancel_all_orders(symbol) alone does NOT cancel them — need params stop=True.
+    """
+    result = {"regular_ok": False, "algo_ok": False, "errors": []}
+    before = count_open_orders(exchange, symbol)
+    result["before"] = before
+
+    try:
+        exchange.cancel_all_orders(symbol)
+        result["regular_ok"] = True
+        log.info("cancel_all_orders (regular) OK for %s", symbol)
+    except Exception as e:
+        result["errors"].append(f"regular:{e}")
+        log.warning("cancel_all_orders (regular) failed: %s", e)
+
+    try:
+        # CCXT routes stop/trigger/conditional → fapiPrivateDeleteAlgoOpenOrders
+        exchange.cancel_all_orders(symbol, {"stop": True})
+        result["algo_ok"] = True
+        log.info("cancel_all_orders (algo/conditional) OK for %s", symbol)
+    except Exception as e:
+        result["errors"].append(f"algo:{e}")
+        log.warning("cancel_all_orders (algo) failed: %s", e)
+        # Direct fallback
+        try:
+            mid = _market_id(exchange, symbol)
+            exchange.fapiPrivateDeleteAlgoOpenOrders({"symbol": mid})
+            result["algo_ok"] = True
+            log.info("fapiPrivateDeleteAlgoOpenOrders OK for %s", symbol)
+        except Exception as e2:
+            result["errors"].append(f"algo_direct:{e2}")
+            log.warning("fapiPrivateDeleteAlgoOpenOrders failed: %s", e2)
+
+    after = count_open_orders(exchange, symbol)
+    result["after"] = after
+    result["cancelled_est"] = max(0, before["total"] - after["total"])
+    return result
+
+
+def sweep_orphan_orders(exchange, symbol: str, *, retries: int = 2) -> dict[str, Any]:
+    """
+    If flat, cancel leftover SL/TP (regular + algo).
+
+    Returns dict with cancelled_est, before/after counts, flat flag.
+    Never cancels while a position is still open.
     """
     last_err: BaseException | None = None
     for attempt in range(retries + 1):
         try:
             if has_open_position(exchange, symbol):
-                return 0
-            n = cancel_open_orders(exchange, symbol)
-            if n:
-                log.info("Swept %s leftover order(s) while flat", n)
-            return n if n >= 0 else 0
+                return {"flat": False, "cancelled_est": 0, "skipped": "position_open"}
+            detail = cancel_all_working_orders(exchange, symbol)
+            cancelled = int(detail.get("cancelled_est") or 0)
+            if cancelled or detail.get("before", {}).get("total", 0):
+                log.info(
+                    "Orphan sweep flat=%s before=%s after=%s cancelled≈%s",
+                    True,
+                    detail.get("before"),
+                    detail.get("after"),
+                    cancelled,
+                )
+            return {
+                "flat": True,
+                "cancelled_est": cancelled,
+                "before": detail.get("before"),
+                "after": detail.get("after"),
+                "errors": detail.get("errors") or [],
+            }
         except Exception as e:
             last_err = e
             if attempt < retries and _is_transient_network(e):
@@ -149,12 +223,74 @@ def sweep_orphan_orders(exchange, symbol: str, *, retries: int = 2) -> int:
                 )
                 time.sleep(delay)
                 continue
-            # Non-transient or retries exhausted — do not cancel blindly
             log.warning("Orphan sweep skipped: %s", e)
-            return 0
-    if last_err:
-        log.warning("Orphan sweep skipped: %s", last_err)
-    return 0
+            return {"flat": None, "cancelled_est": 0, "error": str(e)}
+    return {"flat": None, "cancelled_est": 0, "error": str(last_err)}
+
+
+def place_protective_orders(
+    exchange,
+    symbol: str,
+    *,
+    direction: int,
+    amount: float,
+    stop: float,
+    take_profit: float,
+) -> dict[str, Any]:
+    """Place reduce-only STOP_MARKET + TAKE_PROFIT_MARKET."""
+    close_side = "sell" if direction == 1 else "buy"
+    stop_p = _round_price(exchange, symbol, stop)
+    tp_p = _round_price(exchange, symbol, take_profit)
+    amt = float(exchange.amount_to_precision(symbol, amount))
+
+    sl = exchange.create_order(
+        symbol,
+        "STOP_MARKET",
+        close_side,
+        amt,
+        None,
+        {"stopPrice": stop_p, "reduceOnly": True},
+    )
+    tp = exchange.create_order(
+        symbol,
+        "TAKE_PROFIT_MARKET",
+        close_side,
+        amt,
+        None,
+        {"stopPrice": tp_p, "reduceOnly": True},
+    )
+    return {
+        "stop": stop_p,
+        "take_profit": tp_p,
+        "amount": amt,
+        "stop_order_id": sl.get("id"),
+        "tp_order_id": tp.get("id"),
+    }
+
+
+def replace_stop_order(
+    exchange,
+    symbol: str,
+    *,
+    direction: int,
+    amount: float,
+    new_stop: float,
+    take_profit: float,
+) -> dict[str, Any]:
+    """
+    Cancel all protective orders and re-place SL + TP at new stop.
+
+    Safer than cancelling one order by id (algo vs regular id mismatch).
+    """
+    cancel_all_working_orders(exchange, symbol)
+    return place_protective_orders(
+        exchange,
+        symbol,
+        direction=direction,
+        amount=amount,
+        stop=new_stop,
+        take_profit=take_profit,
+    )
 
 
 def open_signal_trade(
@@ -167,7 +303,6 @@ def open_signal_trade(
 ) -> dict[str, Any]:
     """
     Market entry + STOP_MARKET + TAKE_PROFIT_MARKET (reduce-only).
-    Matches backtest entry at signal bar; trailing deferred to later version.
 
     Skips if live price has moved adversely vs signal entry by more than
     live.max_entry_deviation_pct (default 0.25% ≈ $160 at 64k).
@@ -190,9 +325,6 @@ def open_signal_trade(
         raise RuntimeError("position size is zero")
 
     side = "buy" if sig.direction == 1 else "sell"
-    close_side = "sell" if sig.direction == 1 else "buy"
-    stop_p = _round_price(exchange, symbol, sig.stop)
-    tp_p = _round_price(exchange, symbol, sig.take_profit)
 
     plan = {
         "side": side,
@@ -201,10 +333,11 @@ def open_signal_trade(
         "live_price": live_px,
         "adverse_pct": round(adverse, 4),
         "slip_usd": round(abs_move, 2),
-        "stop": stop_p,
-        "take_profit": tp_p,
+        "stop": float(sig.stop),
+        "take_profit": float(sig.take_profit),
         "rr": sig.rr,
         "balance": balance,
+        "direction": sig.direction,
     }
     log.info("Trade plan: %s", plan)
 
@@ -229,25 +362,18 @@ def open_signal_trade(
     plan["fill"] = fill
     plan["fill_slip_usd"] = round(abs(fill - sig.entry), 2)
 
-    sl = exchange.create_order(
+    protective = place_protective_orders(
+        exchange,
         symbol,
-        "STOP_MARKET",
-        close_side,
-        amount,
-        None,
-        {"stopPrice": stop_p, "reduceOnly": True},
+        direction=sig.direction,
+        amount=amount,
+        stop=sig.stop,
+        take_profit=sig.take_profit,
     )
-    tp = exchange.create_order(
-        symbol,
-        "TAKE_PROFIT_MARKET",
-        close_side,
-        amount,
-        None,
-        {"stopPrice": tp_p, "reduceOnly": True},
-    )
+    plan.update(protective)
+    plan["initial_stop"] = float(sig.stop)
+    plan["trail_active"] = False
     return {
         "entry_order_id": entry_order.get("id"),
-        "stop_order_id": sl.get("id"),
-        "tp_order_id": tp.get("id"),
         **plan,
     }

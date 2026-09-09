@@ -5,7 +5,6 @@ Live / demo runner.
   python run_live.py --once
   python run_live.py --cycle-once --dry-run
   python run_live.py --config configs/ict_daily_on.yaml --env-file .env.daily_on
-  python run_live.py --config configs/ict_daily_off.yaml --env-file .env.daily_off
 """
 
 from __future__ import annotations
