@@ -40,7 +40,9 @@ python run_mentor_collector.py --env-file .env.mentor
 New and edited posts are saved to `mentor_data/messages.sqlite3`; attached
 images and documents are saved under `mentor_data/media/`. Both are ignored by
 git. Albums retain the Telegram `grouped_id` so the analysis stage can process
-their screenshots together.
+their screenshots together. Reply links, the direct parent post, forwarding
+metadata, and content hashes are retained. Cross-channel duplicates remain in
+the audit log and will be grouped into one idea by the analysis stage.
 
 The collector does not import old history automatically and cannot place
 orders. Historical import and model analysis will be added after both channel

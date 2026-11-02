@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import hashlib
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -24,6 +25,30 @@ def _media_kind(message: Message) -> str | None:
     return None
 
 
+def _sha256_file(path: str) -> str:
+    digest = hashlib.sha256()
+    with open(path, "rb") as handle:
+        for chunk in iter(lambda: handle.read(1024 * 1024), b""):
+            digest.update(chunk)
+    return digest.hexdigest()
+
+
+def _peer_id(peer) -> int | None:
+    if peer is None:
+        return None
+    for name in ("channel_id", "chat_id", "user_id"):
+        value = getattr(peer, name, None)
+        if value is not None:
+            return int(value)
+    return None
+
+
+def _fingerprint(text: str, media_sha256: str | None) -> str:
+    normalized = " ".join(text.casefold().split())
+    payload = f"{normalized}\n{media_sha256 or ''}".encode("utf-8")
+    return hashlib.sha256(payload).hexdigest()
+
+
 class MentorCollector:
     def __init__(self, settings: MentorSettings):
         self.settings = settings
@@ -35,11 +60,9 @@ class MentorCollector:
             settings.api_hash,
         )
 
-    async def _save(self, event) -> None:
-        message: Message = event.message
-        chat = await event.get_chat()
-        chat_id = int(event.chat_id)
+    async def _save_message(self, message: Message, chat, chat_id: int) -> None:
         media_path: str | None = None
+        media_sha256: str | None = None
         kind = _media_kind(message)
 
         if message.media:
@@ -49,6 +72,11 @@ class MentorCollector:
             downloaded = await message.download_media(file=str(target))
             if downloaded:
                 media_path = str(Path(downloaded).resolve())
+                media_sha256 = _sha256_file(media_path)
+
+        forward = message.fwd_from
+        reply = message.reply_to
+        text = message.raw_text or ""
 
         record = StoredMessage(
             chat_id=chat_id,
@@ -58,9 +86,16 @@ class MentorCollector:
             channel_username=getattr(chat, "username", None),
             posted_at=message.date,
             edited_at=message.edit_date,
-            text=message.raw_text or "",
+            text=text,
             media_path=media_path,
             media_kind=kind,
+            media_sha256=media_sha256,
+            content_fingerprint=_fingerprint(text, media_sha256),
+            reply_to_message_id=int(message.reply_to_msg_id) if message.reply_to_msg_id else None,
+            reply_to_top_id=int(reply.reply_to_top_id) if reply and reply.reply_to_top_id else None,
+            forward_from_id=_peer_id(forward.from_id) if forward else None,
+            forward_from_name=getattr(forward, "from_name", None) if forward else None,
+            forward_date=getattr(forward, "date", None) if forward else None,
         )
         self.store.upsert(record)
         log.info(
@@ -71,6 +106,19 @@ class MentorCollector:
             record.media_kind,
             self.store.count(),
         )
+
+    async def _save(self, event) -> None:
+        message: Message = event.message
+        chat = await event.get_chat()
+        chat_id = int(event.chat_id)
+        await self._save_message(message, chat, chat_id)
+
+        # A reply may point to a post created before the collector started.
+        # Save that direct parent as context without recursively importing history.
+        if message.reply_to_msg_id:
+            parent = await message.get_reply_message()
+            if parent is not None:
+                await self._save_message(parent, chat, chat_id)
 
     async def run(self) -> None:
         await self.client.start()
