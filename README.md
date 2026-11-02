@@ -8,6 +8,8 @@
 
 Live / VPS: [`docs/LIVE.md`](docs/LIVE.md) · DigitalOcean: [`docs/DEPLOY_DO.md`](docs/DEPLOY_DO.md)
 
+Mentor-channel agent: [`docs/MENTOR_AGENT.md`](docs/MENTOR_AGENT.md)
+
 ## Быстрый старт
 
 ```powershell
