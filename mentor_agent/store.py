@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+import json
 from typing import Any
 from dataclasses import dataclass
 from datetime import datetime
@@ -49,6 +50,19 @@ CREATE TABLE IF NOT EXISTS telegram_messages (
     forward_date TEXT,
     collected_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
     PRIMARY KEY (chat_id, message_id)
+);
+CREATE TABLE IF NOT EXISTS mentor_analysis_runs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    model TEXT NOT NULL,
+    prompt_version TEXT NOT NULL,
+    response_id TEXT,
+    input_tokens INTEGER,
+    output_tokens INTEGER,
+    total_tokens INTEGER,
+    result_json TEXT NOT NULL,
+    created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
 """
 
@@ -164,3 +178,80 @@ class MessageStore:
                 (max(1, int(limit)),),
             ).fetchall()
         return [dict(row) for row in rows]
+
+    def get(self, chat_id: int, message_id: int) -> dict[str, Any] | None:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            row = conn.execute(
+                "SELECT * FROM telegram_messages WHERE chat_id=? AND message_id=?",
+                (chat_id, message_id),
+            ).fetchone()
+        return dict(row) if row else None
+
+    def find_message(self, message_id: int) -> dict[str, Any]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                "SELECT * FROM telegram_messages WHERE message_id=?",
+                (message_id,),
+            ).fetchall()
+        if not rows:
+            raise LookupError(f"message {message_id} not found")
+        if len(rows) > 1:
+            raise LookupError(
+                f"message {message_id} exists in multiple channels; pass --chat-id"
+            )
+        return dict(rows[0])
+
+    def context_chain(self, chat_id: int, message_id: int) -> list[dict[str, Any]]:
+        current = self.get(chat_id, message_id)
+        if current is None:
+            raise LookupError(f"message {message_id} not found in chat {chat_id}")
+        chain = [current]
+        seen = {message_id}
+        while current.get("reply_to_message_id"):
+            parent_id = int(current["reply_to_message_id"])
+            if parent_id in seen:
+                break
+            parent = self.get(chat_id, parent_id)
+            if parent is None:
+                break
+            chain.append(parent)
+            seen.add(parent_id)
+            current = parent
+        return list(reversed(chain))
+
+    def save_analysis(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        model: str,
+        prompt_version: str,
+        response_id: str | None,
+        input_tokens: int | None,
+        output_tokens: int | None,
+        total_tokens: int | None,
+        result: dict[str, Any],
+    ) -> int:
+        with self._connect() as conn:
+            cursor = conn.execute(
+                """
+                INSERT INTO mentor_analysis_runs (
+                    chat_id, message_id, model, prompt_version, response_id,
+                    input_tokens, output_tokens, total_tokens, result_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    chat_id,
+                    message_id,
+                    model,
+                    prompt_version,
+                    response_id,
+                    input_tokens,
+                    output_tokens,
+                    total_tokens,
+                    json.dumps(result, ensure_ascii=False),
+                ),
+            )
+            return int(cursor.lastrowid)

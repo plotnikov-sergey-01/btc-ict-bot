@@ -5,3 +5,4 @@ pyyaml>=6.0
 pyarrow>=14.0
 requests>=2.31
 telethon>=1.36
+openai>=2.0

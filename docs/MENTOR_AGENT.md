@@ -54,6 +54,16 @@ Inspect the latest collected records without opening SQLite manually:
 python run_mentor_inspect.py --env-file .env.mentor --limit 20
 ```
 
+Analyze one message together with its reply chain. This calls OpenAI, spends API
+credits, stores the structured result and usage, but never calls Binance:
+
+```powershell
+python run_mentor_analyze.py 7118 --env-file .env.mentor
+```
+
+The default model is `gpt-6.1-sol` with medium reasoning. Override it through
+`OPENAI_MODEL` and `OPENAI_REASONING_EFFORT` in `.env.mentor`.
+
 ## Planned structured idea
 
 The analysis result will include source IDs, symbol, direction, setup status,
