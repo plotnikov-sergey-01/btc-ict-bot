@@ -64,6 +64,24 @@ python run_mentor_analyze.py 7118 --env-file .env.mentor
 The default model is `gpt-6.1-sol` with medium reasoning. Override it through
 `OPENAI_MODEL` and `OPENAI_REASONING_EFFORT` in `.env.mentor`.
 
+## Observation services
+
+The collector queues only newly received or edited posts. The worker waits 90
+seconds so Telegram albums can complete, analyzes the whole album/reply chain,
+stores usage and results, and optionally sends an English summary through the
+existing notification bot. It has no Binance execution path.
+
+```bash
+sudo cp deploy/systemd/mentor-collector.service /etc/systemd/system/
+sudo cp deploy/systemd/mentor-analyzer.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now mentor-collector mentor-analyzer
+journalctl -u mentor-collector -u mentor-analyzer -f
+```
+
+The default safety cap is 20 successful analyses per rolling 24 hours. Change
+`MENTOR_MAX_ANALYSES_PER_DAY` in `.env.mentor` if needed.
+
 ## Planned structured idea
 
 The analysis result will include source IDs, symbol, direction, setup status,

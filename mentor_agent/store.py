@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import sqlite3
 import json
+import time
 from typing import Any
 from dataclasses import dataclass
 from datetime import datetime
@@ -64,6 +65,20 @@ CREATE TABLE IF NOT EXISTS mentor_analysis_runs (
     result_json TEXT NOT NULL,
     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
 );
+CREATE TABLE IF NOT EXISTS mentor_analysis_jobs (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    chat_id INTEGER NOT NULL,
+    message_id INTEGER NOT NULL,
+    group_key TEXT NOT NULL,
+    available_at_epoch INTEGER NOT NULL,
+    status TEXT NOT NULL DEFAULT 'pending',
+    attempts INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    updated_at_epoch INTEGER NOT NULL,
+    UNIQUE(chat_id, message_id)
+);
+CREATE INDEX IF NOT EXISTS idx_analysis_jobs_pending
+    ON mentor_analysis_jobs(status, available_at_epoch);
 """
 
 MIGRATION_COLUMNS = {
@@ -220,6 +235,156 @@ class MessageStore:
             seen.add(parent_id)
             current = parent
         return list(reversed(chain))
+
+    def _album(self, chat_id: int, grouped_id: int) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT * FROM telegram_messages
+                WHERE chat_id=? AND grouped_id=?
+                ORDER BY message_id
+                """,
+                (chat_id, grouped_id),
+            ).fetchall()
+        return [dict(row) for row in rows]
+
+    def context_bundle(self, chat_id: int, message_id: int) -> list[dict[str, Any]]:
+        chain = self.context_chain(chat_id, message_id)
+        bundled: list[dict[str, Any]] = []
+        seen: set[int] = set()
+        for item in chain:
+            siblings = (
+                self._album(chat_id, int(item["grouped_id"]))
+                if item.get("grouped_id")
+                else [item]
+            )
+            for sibling in siblings:
+                mid = int(sibling["message_id"])
+                if mid not in seen:
+                    bundled.append(sibling)
+                    seen.add(mid)
+        return bundled
+
+    def enqueue_analysis(
+        self,
+        *,
+        chat_id: int,
+        message_id: int,
+        grouped_id: int | None,
+        delay_sec: int,
+    ) -> None:
+        now = int(time.time())
+        group_key = f"album:{grouped_id}" if grouped_id else f"message:{message_id}"
+        with self._connect() as conn:
+            conn.execute(
+                """
+                INSERT INTO mentor_analysis_jobs (
+                    chat_id, message_id, group_key, available_at_epoch,
+                    status, attempts, last_error, updated_at_epoch
+                ) VALUES (?, ?, ?, ?, 'pending', 0, NULL, ?)
+                ON CONFLICT(chat_id, message_id) DO UPDATE SET
+                    group_key=excluded.group_key,
+                    available_at_epoch=excluded.available_at_epoch,
+                    status='pending', attempts=0, last_error=NULL,
+                    updated_at_epoch=excluded.updated_at_epoch
+                """,
+                (chat_id, message_id, group_key, now + max(0, delay_sec), now),
+            )
+
+    def claim_analysis_job(self) -> dict[str, Any] | None:
+        now = int(time.time())
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            conn.execute("BEGIN IMMEDIATE")
+            # Recover a job if the worker died while processing it.
+            conn.execute(
+                """
+                UPDATE mentor_analysis_jobs SET status='pending'
+                WHERE status='processing' AND updated_at_epoch < ?
+                """,
+                (now - 900,),
+            )
+            first = conn.execute(
+                """
+                SELECT * FROM mentor_analysis_jobs
+                WHERE status='pending' AND available_at_epoch <= ?
+                ORDER BY available_at_epoch, id LIMIT 1
+                """,
+                (now,),
+            ).fetchone()
+            if first is None:
+                return None
+            rows = conn.execute(
+                """
+                SELECT * FROM mentor_analysis_jobs
+                WHERE status='pending' AND chat_id=? AND group_key=?
+                ORDER BY message_id
+                """,
+                (first["chat_id"], first["group_key"]),
+            ).fetchall()
+            ids = [int(row["id"]) for row in rows]
+            placeholders = ",".join("?" for _ in ids)
+            conn.execute(
+                f"UPDATE mentor_analysis_jobs SET status='processing', updated_at_epoch=? "
+                f"WHERE id IN ({placeholders})",
+                (now, *ids),
+            )
+            target = max(rows, key=lambda row: int(row["message_id"]))
+            return {
+                "job_ids": ids,
+                "chat_id": int(target["chat_id"]),
+                "message_id": int(target["message_id"]),
+                "attempts": max(int(row["attempts"]) for row in rows),
+            }
+
+    def finish_analysis_jobs(self, job_ids: list[int]) -> None:
+        if not job_ids:
+            return
+        placeholders = ",".join("?" for _ in job_ids)
+        with self._connect() as conn:
+            conn.execute(
+                f"UPDATE mentor_analysis_jobs SET status='done', updated_at_epoch=? "
+                f"WHERE id IN ({placeholders})",
+                (int(time.time()), *job_ids),
+            )
+
+    def fail_analysis_jobs(
+        self, job_ids: list[int], error: str, *, max_attempts: int = 3
+    ) -> None:
+        if not job_ids:
+            return
+        now = int(time.time())
+        placeholders = ",".join("?" for _ in job_ids)
+        with self._connect() as conn:
+            rows = conn.execute(
+                f"SELECT id, attempts FROM mentor_analysis_jobs "
+                f"WHERE id IN ({placeholders})",
+                job_ids,
+            ).fetchall()
+            for job_id, attempts in rows:
+                next_attempt = int(attempts) + 1
+                status = "failed" if next_attempt >= max_attempts else "pending"
+                retry_at = now if status == "failed" else now + 60 * next_attempt
+                conn.execute(
+                    """
+                    UPDATE mentor_analysis_jobs
+                    SET status=?, attempts=?, last_error=?,
+                        available_at_epoch=?, updated_at_epoch=?
+                    WHERE id=?
+                    """,
+                    (status, next_attempt, error[-2000:], retry_at, now, job_id),
+                )
+
+    def analyses_last_24h(self) -> int:
+        with self._connect() as conn:
+            row = conn.execute(
+                """
+                SELECT COUNT(*) FROM mentor_analysis_runs
+                WHERE created_at >= datetime('now', '-1 day')
+                """
+            ).fetchone()
+        return int(row[0])
 
     def save_analysis(
         self,

@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import hashlib
+import os
 from pathlib import Path
 
 from telethon import TelegramClient, events
@@ -60,7 +61,9 @@ class MentorCollector:
             settings.api_hash,
         )
 
-    async def _save_message(self, message: Message, chat, chat_id: int) -> None:
+    async def _save_message(
+        self, message: Message, chat, chat_id: int, *, enqueue: bool
+    ) -> None:
         media_path: str | None = None
         media_sha256: str | None = None
         kind = _media_kind(message)
@@ -98,6 +101,13 @@ class MentorCollector:
             forward_date=getattr(forward, "date", None) if forward else None,
         )
         self.store.upsert(record)
+        if enqueue:
+            self.store.enqueue_analysis(
+                chat_id=chat_id,
+                message_id=record.message_id,
+                grouped_id=record.grouped_id,
+                delay_sec=int(os.getenv("MENTOR_ANALYSIS_DELAY_SEC", "90")),
+            )
         log.info(
             "Saved channel=%s message=%s group=%s media=%s total=%s",
             record.channel_title,
@@ -111,14 +121,14 @@ class MentorCollector:
         message: Message = event.message
         chat = await event.get_chat()
         chat_id = int(event.chat_id)
-        await self._save_message(message, chat, chat_id)
+        await self._save_message(message, chat, chat_id, enqueue=True)
 
         # A reply may point to a post created before the collector started.
         # Save that direct parent as context without recursively importing history.
         if message.reply_to_msg_id:
             parent = await message.get_reply_message()
             if parent is not None:
-                await self._save_message(parent, chat, chat_id)
+                await self._save_message(parent, chat, chat_id, enqueue=False)
 
     async def run(self) -> None:
         await self.client.start()

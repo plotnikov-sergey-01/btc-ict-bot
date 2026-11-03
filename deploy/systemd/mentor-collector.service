@@ -1,0 +1,15 @@
+[Unit]
+Description=Mentor Telegram channel collector
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=ict
+WorkingDirectory=/home/ict/btc-ict-bot
+ExecStart=/home/ict/btc-ict-bot/.venv/bin/python run_mentor_collector.py --env-file .env.mentor
+Restart=always
+RestartSec=15
+
+[Install]
+WantedBy=multi-user.target
