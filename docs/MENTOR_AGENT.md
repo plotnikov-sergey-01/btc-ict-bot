@@ -48,6 +48,12 @@ The collector does not import old history automatically and cannot place
 orders. Historical import and model analysis will be added after both channel
 IDs are verified and a small real sample has been collected.
 
+Inspect the latest collected records without opening SQLite manually:
+
+```powershell
+python run_mentor_inspect.py --env-file .env.mentor --limit 20
+```
+
 ## Planned structured idea
 
 The analysis result will include source IDs, symbol, direction, setup status,

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import sqlite3
+from typing import Any
 from dataclasses import dataclass
 from datetime import datetime
 from pathlib import Path
@@ -145,3 +146,21 @@ class MessageStore:
         with self._connect() as conn:
             row = conn.execute("SELECT COUNT(*) FROM telegram_messages").fetchone()
         return int(row[0])
+
+    def recent(self, limit: int = 20) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT chat_id, message_id, grouped_id, channel_title,
+                       posted_at, edited_at, text, media_path, media_kind,
+                       content_fingerprint, reply_to_message_id,
+                       reply_to_top_id, forward_from_id, forward_from_name,
+                       forward_date
+                FROM telegram_messages
+                ORDER BY posted_at DESC, message_id DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [dict(row) for row in rows]
