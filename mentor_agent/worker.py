@@ -21,12 +21,16 @@ def _summary(output: dict) -> str:
         f"{result.get('symbol') or '?'} {str(result.get('direction')).upper()} · {result.get('classification')}",
         f"action={result.get('actionability')} stage={result.get('setup_stage')}",
         str(result.get("summary") or ""),
+        "Thesis: " + str(result.get("market_thesis") or ""),
         f"monitor={result.get('monitor_market')} trade_plan={result.get('allow_trade_plan')} execution=False",
         f"confidence={result.get('confidence')} tokens={usage.get('total_tokens')}",
     ]
     missing = result.get("missing_information") or []
     if missing:
         lines.append("Missing: " + "; ".join(str(x) for x in missing[:4]))
+    tasks = result.get("strategy_tasks") or []
+    if tasks:
+        lines.append("Next: " + "; ".join(str(x) for x in tasks[:4]))
     return "\n".join(lines)
 
 

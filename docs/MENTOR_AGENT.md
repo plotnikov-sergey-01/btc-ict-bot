@@ -64,6 +64,13 @@ python run_mentor_analyze.py 7118 --env-file .env.mentor
 The default model is `gpt-6.1-sol` with medium reasoning. Override it through
 `OPENAI_MODEL` and `OPENAI_REASONING_EFFORT` in `.env.mentor`.
 
+The analyzer treats mentor posts as discretionary market theses, not as order
+tickets. It extracts directional bias, chart arrows, expected move sequence and
+the probable role of marked zones. Missing exact entry/SL/TP is normal. A later
+strategy stage will search 15m/5m confirmations, place a candidate stop beyond
+the relevant recent swing, derive targets from the thesis/liquidity and validate
+RR before any demo approval is possible.
+
 ## Observation services
 
 The collector queues only newly received or edited posts. The worker waits 90
