@@ -31,6 +31,27 @@ def _summary(output: dict) -> str:
     tasks = result.get("strategy_tasks") or []
     if tasks:
         lines.append("Next: " + "; ".join(str(x) for x in tasks[:4]))
+    candidates = result.get("trade_candidates") or []
+    for idx, candidate in enumerate(candidates[:2], start=1):
+        entry = candidate.get("entry_price")
+        if entry is None:
+            lo, hi = candidate.get("entry_low"), candidate.get("entry_high")
+            entry = (
+                f"{lo}-{hi}"
+                if lo is not None or hi is not None
+                else candidate.get("entry_rule")
+            )
+        stop = candidate.get("stop_price")
+        if stop is None:
+            stop = candidate.get("stop_rule")
+        target = candidate.get("take_profit_price")
+        if target is None:
+            target = candidate.get("take_profit_rule")
+        lines.append(
+            f"Candidate {idx}: {str(candidate.get('side')).upper()} "
+            f"entry={entry} SL={stop} TP={target} "
+            f"RR={candidate.get('estimated_rr')} status={candidate.get('status')}"
+        )
     return "\n".join(lines)
 
 

@@ -71,6 +71,19 @@ strategy stage will search 15m/5m confirmations, place a candidate stop beyond
 the relevant recent swing, derive targets from the thesis/liquidity and validate
 RR before any demo approval is possible.
 
+Starting with prompt `mentor_v4_trade_candidates`, every directional live thesis
+also produces a provisional, testable trade candidate: entry zone/rule, trigger,
+SL price/rule, TP price/rule and estimated RR. Exact values are inferred only
+when chart scale supports them. These candidates are research records and cannot
+execute orders.
+
+Requeue a few previously analyzed posts to compare the current prompt with older
+analysis versions:
+
+```bash
+python run_mentor_reanalyze.py --env-file .env.mentor --limit 5
+```
+
 ## Observation services
 
 The collector queues only newly received or edited posts. The worker waits 90

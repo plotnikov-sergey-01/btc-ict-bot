@@ -11,7 +11,7 @@ from openai import OpenAI
 
 from .store import MessageStore
 
-PROMPT_VERSION = "mentor_v3_thesis"
+PROMPT_VERSION = "mentor_v4_trade_candidates"
 
 ANALYSIS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -109,6 +109,44 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
         "targets": {"type": "array", "items": {"type": "number"}},
         "missing_information": {"type": "array", "items": {"type": "string"}},
         "strategy_tasks": {"type": "array", "items": {"type": "string"}},
+        "trade_candidates": {
+            "type": "array",
+            "items": {
+                "type": "object",
+                "additionalProperties": False,
+                "properties": {
+                    "side": {"type": "string", "enum": ["long", "short"]},
+                    "status": {
+                        "type": "string",
+                        "enum": ["provisional", "waiting_trigger", "ready", "insufficient_chart_scale"],
+                    },
+                    "entry_style": {
+                        "type": "string",
+                        "enum": ["limit_zone", "breakout", "retest", "market_confirmation", "swing_confirmation"],
+                    },
+                    "entry_price": {"type": ["number", "null"]},
+                    "entry_low": {"type": ["number", "null"]},
+                    "entry_high": {"type": ["number", "null"]},
+                    "entry_rule": {"type": "string"},
+                    "trigger": {"type": "string"},
+                    "stop_price": {"type": ["number", "null"]},
+                    "stop_rule": {"type": "string"},
+                    "take_profit_price": {"type": ["number", "null"]},
+                    "take_profit_rule": {"type": "string"},
+                    "estimated_rr": {"type": ["number", "null"]},
+                    "expiry": {"type": ["string", "null"]},
+                    "rationale": {"type": "string"},
+                    "market_data_needed": {"type": "array", "items": {"type": "string"}},
+                    "confidence": {"type": "number", "minimum": 0, "maximum": 1},
+                },
+                "required": [
+                    "side", "status", "entry_style", "entry_price", "entry_low",
+                    "entry_high", "entry_rule", "trigger", "stop_price", "stop_rule",
+                    "take_profit_price", "take_profit_rule", "estimated_rr", "expiry",
+                    "rationale", "market_data_needed", "confidence"
+                ],
+            },
+        },
         "evidence": {"type": "array", "items": {"type": "string"}},
         "confidence": {"type": "number", "minimum": 0, "maximum": 1},
         "monitor_market": {"type": "boolean"},
@@ -119,7 +157,8 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
         "actionability", "setup_stage", "timeframes", "expected_path", "zones",
         "levels", "activation_conditions",
         "invalidation_conditions", "targets", "missing_information",
-        "strategy_tasks", "evidence", "confidence", "monitor_market", "allow_trade_plan",
+        "strategy_tasks", "trade_candidates", "evidence", "confidence",
+        "monitor_market", "allow_trade_plan",
     ],
 }
 
@@ -148,6 +187,20 @@ to search for a 15m or 5m entry, derive a stop beyond the relevant recent swing,
 target from the thesis/liquidity, and validate risk-reward. Exact author-provided SL/TP are
 not required. Put those required downstream calculations in strategy_tasks rather than
 missing_information.
+
+For every live thesis with a discernible direction, produce at least one trade_candidates
+item. Convert the thesis into a concrete, testable proposal rather than merely describing
+the chart. Prefer a numeric entry zone, stop and take-profit whenever the chart scale and
+visible structure support them. Values inferred from the axis or drawings may be approximate,
+but explain that in rationale and lower confidence. Do not fabricate a number when the scale
+is unreadable; keep that numeric field null and provide an executable rule such as "enter
+after a 5m bullish CHoCH and retest inside the marked demand zone", "stop below the last
+confirmed 5m swing low plus an ATR buffer", or "target the marked 1h liquidity high".
+
+Use the author's intended path to choose the candidate. Check geometry: a long stop must be
+below entry and its target above; a short stop must be above entry and its target below.
+Calculate estimated_rr when entry, stop and target are numeric. If RR is below 2, retain the
+candidate as provisional and explicitly state that it fails the preferred RR threshold.
 
 Write summary, thesis, evidence and conditions in English. This stage never places trades,
 and must clearly preserve ambiguity when a visual role cannot be determined."""
@@ -186,6 +239,37 @@ def _chain_text(chain: list[dict[str, Any]]) -> str:
     return "\n\n--- NEXT MESSAGE IN THREAD ---\n\n".join(blocks)
 
 
+def _normalize_trade_candidates(result: dict[str, Any]) -> None:
+    for candidate in result.get("trade_candidates") or []:
+        entry = candidate.get("entry_price")
+        if entry is None:
+            low, high = candidate.get("entry_low"), candidate.get("entry_high")
+            if low is not None and high is not None:
+                entry = (float(low) + float(high)) / 2.0
+        stop = candidate.get("stop_price")
+        target = candidate.get("take_profit_price")
+        if entry is None or stop is None or target is None:
+            candidate["estimated_rr"] = None
+            continue
+        entry, stop, target = float(entry), float(stop), float(target)
+        side = candidate.get("side")
+        valid = (
+            side == "long" and stop < entry < target
+        ) or (
+            side == "short" and target < entry < stop
+        )
+        if not valid:
+            candidate["status"] = "provisional"
+            candidate["estimated_rr"] = None
+            candidate["rationale"] += " Geometry validation failed; levels require market-data correction."
+            continue
+        risk = abs(entry - stop)
+        candidate["estimated_rr"] = round(abs(target - entry) / risk, 2) if risk else None
+        if candidate["estimated_rr"] is not None and candidate["estimated_rr"] < 2:
+            candidate["status"] = "provisional"
+            candidate["rationale"] += " Candidate is below the preferred 2R threshold."
+
+
 def analyze_message(
     store: MessageStore,
     *,
@@ -222,6 +306,7 @@ def analyze_message(
         },
     )
     result = json.loads(response.output_text)
+    _normalize_trade_candidates(result)
     result["allow_execution"] = False
     usage = response.usage
     run_id = store.save_analysis(

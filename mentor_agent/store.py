@@ -386,6 +386,20 @@ class MessageStore:
             ).fetchone()
         return int(row[0])
 
+    def recent_analysis_targets(self, limit: int) -> list[tuple[int, int]]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                """
+                SELECT chat_id, message_id, MAX(id) AS latest_run
+                FROM mentor_analysis_runs
+                GROUP BY chat_id, message_id
+                ORDER BY latest_run DESC
+                LIMIT ?
+                """,
+                (max(1, int(limit)),),
+            ).fetchall()
+        return [(int(row[0]), int(row[1])) for row in rows]
+
     def save_analysis(
         self,
         *,
