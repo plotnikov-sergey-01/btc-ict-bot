@@ -400,6 +400,34 @@ class MessageStore:
             ).fetchall()
         return [(int(row[0]), int(row[1])) for row in rows]
 
+    def trade_candidate_runs(self, prompt_prefix: str) -> list[dict[str, Any]]:
+        with self._connect() as conn:
+            conn.row_factory = sqlite3.Row
+            rows = conn.execute(
+                """
+                SELECT a.id, a.chat_id, a.message_id, a.model, a.prompt_version,
+                       a.result_json, a.created_at, m.posted_at, m.channel_title
+                FROM mentor_analysis_runs a
+                JOIN telegram_messages m
+                  ON m.chat_id=a.chat_id AND m.message_id=a.message_id
+                WHERE a.prompt_version LIKE ?
+                  AND a.id = (
+                      SELECT MAX(a2.id) FROM mentor_analysis_runs a2
+                      WHERE a2.chat_id=a.chat_id
+                        AND a2.message_id=a.message_id
+                        AND a2.prompt_version LIKE ?
+                  )
+                ORDER BY a.created_at, a.id
+                """,
+                (prompt_prefix + "%", prompt_prefix + "%"),
+            ).fetchall()
+        output = []
+        for row in rows:
+            item = dict(row)
+            item["result"] = json.loads(item.pop("result_json"))
+            output.append(item)
+        return output
+
     def save_analysis(
         self,
         *,

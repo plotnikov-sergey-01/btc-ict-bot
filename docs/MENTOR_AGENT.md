@@ -84,6 +84,14 @@ analysis versions:
 python run_mentor_reanalyze.py --env-file .env.mentor --limit 5
 ```
 
+Evaluate numeric v4 candidates from their actual analysis timestamp against
+subsequent Binance Futures 5m candles. Same-candle ambiguity is counted as a
+conservative `-1R`; candidates without numeric entry/SL/TP are `not_testable`.
+
+```bash
+python run_mentor_pnl.py --env-file .env.mentor --max-days 7 --equity 5000 --risk-pct 1
+```
+
 ## Observation services
 
 The collector queues only newly received or edited posts. The worker waits 90
