@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import argparse
+from collections import Counter
 import json
 import time
 from datetime import datetime, timezone
@@ -163,6 +164,7 @@ def main() -> int:
     parser.add_argument("--equity", type=float, default=5000.0)
     parser.add_argument("--risk-pct", type=float, default=1.0)
     parser.add_argument("--output", default="results/mentor_candidate_pnl.json")
+    parser.add_argument("--print-trades", action="store_true")
     args = parser.parse_args()
 
     load_env_file(args.env_file, override=True)
@@ -210,8 +212,14 @@ def main() -> int:
 
     testable = [t for t in trades if t["outcome"] not in {"not_testable", "invalid_geometry", "symbol_unavailable", "no_candles", "no_elapsed_window"}]
     realized = [t for t in testable if t["outcome"] not in {"open", "not_triggered"}]
-    total_r = round(sum(float(t["r"]) for t in testable), 2)
+    outcome_counts = Counter(str(t["outcome"]) for t in trades)
+    realized_r = round(sum(float(t["r"]) for t in realized), 2)
+    open_mark_r = round(
+        sum(float(t["r"]) for t in testable if t["outcome"] == "open"), 2
+    )
+    total_r = round(realized_r + open_mark_r, 2)
     risk_usd = args.equity * args.risk_pct / 100.0
+    realized_wins = sum(t["outcome"] == "target" for t in realized)
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "window_max_days": args.max_days,
@@ -225,7 +233,18 @@ def main() -> int:
         "open": sum(t["outcome"] == "open" for t in trades),
         "not_triggered": sum(t["outcome"] == "not_triggered" for t in trades),
         "not_testable": sum(t["outcome"] == "not_testable" for t in trades),
+        "outcome_counts": dict(sorted(outcome_counts.items())),
+        "realized_r": realized_r,
+        "open_mark_r": open_mark_r,
         "total_r_including_open_mark": total_r,
+        "realized_win_rate_pct": (
+            round(realized_wins / len(realized) * 100.0, 2) if realized else None
+        ),
+        "average_realized_r": (
+            round(realized_r / len(realized), 2) if realized else None
+        ),
+        "realized_pnl_usd_fixed_risk": round(realized_r * risk_usd, 2),
+        "open_pnl_usd_fixed_risk": round(open_mark_r * risk_usd, 2),
         "potential_pnl_usd_fixed_risk": round(total_r * risk_usd, 2),
     }
     report = {"summary": summary, "trades": trades}
@@ -233,6 +252,23 @@ def main() -> int:
     output.parent.mkdir(parents=True, exist_ok=True)
     output.write_text(json.dumps(report, ensure_ascii=False, indent=2), encoding="utf-8")
     print(json.dumps(summary, ensure_ascii=False, indent=2))
+    if args.print_trades:
+        compact = [
+            {
+                "message_id": t.get("message_id"),
+                "symbol": t.get("symbol") or t.get("symbol_raw"),
+                "candidate": t.get("candidate_index"),
+                "side": t.get("side"),
+                "outcome": t.get("outcome"),
+                "r": t.get("r"),
+                "planned_rr": t.get("planned_rr"),
+                "fill_time": t.get("fill_time"),
+                "exit_time": t.get("exit_time"),
+                "reason": t.get("reason"),
+            }
+            for t in trades
+        ]
+        print(json.dumps({"trade_details": compact}, ensure_ascii=False, indent=2))
     print(f"report={output.resolve()}")
     return 0
 
