@@ -96,7 +96,26 @@ def _evaluate(candidate: dict[str, Any], candles: pd.DataFrame) -> dict[str, Any
             fill_pos = pos
             break
     if fill_pos is None:
-        return {"outcome": "not_triggered", "r": 0.0, "entry": entry, "planned_rr": round(planned_rr, 2)}
+        observed_low = float(candles.low.min())
+        observed_high = float(candles.high.max())
+        if entry < observed_low:
+            closest_distance = observed_low - entry
+        elif entry > observed_high:
+            closest_distance = entry - observed_high
+        else:
+            closest_distance = 0.0
+        return {
+            "outcome": "not_triggered",
+            "r": 0.0,
+            "entry": entry,
+            "stop": stop,
+            "target": target,
+            "planned_rr": round(planned_rr, 2),
+            "observed_low": observed_low,
+            "observed_high": observed_high,
+            "closest_distance": round(closest_distance, 8),
+            "closest_distance_pct": round(closest_distance / entry * 100.0, 4),
+        }
 
     fill_time = candles.index[fill_pos]
     entry_bar = candles.iloc[fill_pos]
@@ -262,6 +281,12 @@ def main() -> int:
                 "outcome": t.get("outcome"),
                 "r": t.get("r"),
                 "planned_rr": t.get("planned_rr"),
+                "entry": t.get("entry"),
+                "stop": t.get("stop"),
+                "target": t.get("target"),
+                "observed_low": t.get("observed_low"),
+                "observed_high": t.get("observed_high"),
+                "closest_distance_pct": t.get("closest_distance_pct"),
                 "fill_time": t.get("fill_time"),
                 "exit_time": t.get("exit_time"),
                 "reason": t.get("reason"),
