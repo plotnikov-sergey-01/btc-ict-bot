@@ -11,7 +11,7 @@ from openai import OpenAI
 
 from .store import MessageStore
 
-PROMPT_VERSION = "mentor_v4_trade_candidates"
+PROMPT_VERSION = "mentor_v5_market_enriched"
 
 ANALYSIS_SCHEMA: dict[str, Any] = {
     "type": "object",
@@ -115,6 +115,7 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
                 "type": "object",
                 "additionalProperties": False,
                 "properties": {
+                    "symbol": {"type": ["string", "null"]},
                     "side": {"type": "string", "enum": ["long", "short"]},
                     "status": {
                         "type": "string",
@@ -140,7 +141,7 @@ ANALYSIS_SCHEMA: dict[str, Any] = {
                     "confidence": {"type": "number", "minimum": 0, "maximum": 1},
                 },
                 "required": [
-                    "side", "status", "entry_style", "entry_price", "entry_low",
+                    "symbol", "side", "status", "entry_style", "entry_price", "entry_low",
                     "entry_high", "entry_rule", "trigger", "stop_price", "stop_rule",
                     "take_profit_price", "take_profit_rule", "estimated_rr", "expiry",
                     "rationale", "market_data_needed", "confidence"
@@ -188,8 +189,10 @@ target from the thesis/liquidity, and validate risk-reward. Exact author-provide
 not required. Put those required downstream calculations in strategy_tasks rather than
 missing_information.
 
-For every live thesis with a discernible direction, produce at least one trade_candidates
-item. Convert the thesis into a concrete, testable proposal rather than merely describing
+For every live thesis with a discernible direction and a specific Binance-tradable crypto
+asset, produce at least one trade_candidates item. Every candidate must contain its own
+symbol because one post may discuss several assets. Convert the thesis into a concrete,
+testable proposal rather than merely describing
 the chart. Prefer a numeric entry zone, stop and take-profit whenever the chart scale and
 visible structure support them. Values inferred from the axis or drawings may be approximate,
 but explain that in rationale and lower confidence. Do not fabricate a number when the scale
@@ -199,8 +202,10 @@ confirmed 5m swing low plus an ATR buffer", or "target the marked 1h liquidity h
 
 Use the author's intended path to choose the candidate. Check geometry: a long stop must be
 below entry and its target above; a short stop must be above entry and its target below.
-Calculate estimated_rr when entry, stop and target are numeric. If RR is below 2, retain the
-candidate as provisional and explicitly state that it fails the preferred RR threshold.
+Calculate estimated_rr when entry, stop and target are numeric. Do not make a standalone
+trade candidate for macro/context charts such as BTC.D, USDT.D, TOTAL, TOTAL2, TOTAL3,
+OTHERS, OTHERS.D, ETHBTC or SOLETH. Use them only to inform the direction of an explicitly
+named Binance USDT-perpetual asset. Candidates below 2R are provisional and cannot be traded.
 
 Write summary, thesis, evidence and conditions in English. This stage never places trades,
 and must clearly preserve ambiguity when a visual role cannot be determined."""
@@ -307,6 +312,12 @@ def analyze_message(
     )
     result = json.loads(response.output_text)
     _normalize_trade_candidates(result)
+    try:
+        from .market_context import enrich_candidates
+
+        enrich_candidates(result)
+    except Exception as exc:
+        result["market_enrichment_error"] = f"{type(exc).__name__}: {exc}"
     result["allow_execution"] = False
     usage = response.usage
     run_id = store.save_analysis(

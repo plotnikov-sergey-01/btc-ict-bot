@@ -14,6 +14,7 @@ import pandas as pd
 
 from ict_bot.exchange_client import load_env_file
 from mentor_agent.settings import MentorSettings
+from mentor_agent.market_context import resolve_symbol
 from mentor_agent.store import MessageStore
 
 
@@ -27,18 +28,6 @@ def _public_exchange():
     )
     exchange.load_markets()
     return exchange
-
-
-def _resolve_symbol(exchange, raw: str | None) -> str | None:
-    if not raw:
-        return None
-    token = raw.upper().replace(" ", "").replace("-", "/")
-    token = token.replace("/USDT:USDT", "").replace("/USDT", "").replace("USDT", "")
-    candidates = [f"{token}/USDT:USDT", f"{token}/USDC:USDC"]
-    for candidate in candidates:
-        if candidate in exchange.markets:
-            return candidate
-    return None
 
 
 def _fetch_5m(exchange, symbol: str, start: pd.Timestamp, end: pd.Timestamp) -> pd.DataFrame:
@@ -75,7 +64,9 @@ def _candidate_entry(candidate: dict[str, Any]) -> float | None:
     return None
 
 
-def _evaluate(candidate: dict[str, Any], candles: pd.DataFrame) -> dict[str, Any]:
+def _evaluate(
+    candidate: dict[str, Any], candles: pd.DataFrame, min_rr: float = 2.0
+) -> dict[str, Any]:
     side = candidate.get("side")
     entry = _candidate_entry(candidate)
     stop = candidate.get("stop_price")
@@ -90,6 +81,13 @@ def _evaluate(candidate: dict[str, Any], candles: pd.DataFrame) -> dict[str, Any
         return {"outcome": "invalid_geometry", "r": 0.0, "reason": "entry/SL/TP geometry"}
     risk = abs(entry - stop)
     planned_rr = abs(target - entry) / risk
+    if planned_rr < min_rr:
+        return {
+            "outcome": "below_min_rr",
+            "r": 0.0,
+            "planned_rr": round(planned_rr, 2),
+            "reason": f"planned RR is below {min_rr:g}",
+        }
     fill_pos = None
     for pos, (_, bar) in enumerate(candles.iterrows()):
         if float(bar.low) <= entry <= float(bar.high):
@@ -182,6 +180,7 @@ def main() -> int:
     parser.add_argument("--max-days", type=int, default=7)
     parser.add_argument("--equity", type=float, default=5000.0)
     parser.add_argument("--risk-pct", type=float, default=1.0)
+    parser.add_argument("--min-rr", type=float, default=2.0)
     parser.add_argument("--output", default="results/mentor_candidate_pnl.json")
     parser.add_argument("--print-trades", action="store_true")
     args = parser.parse_args()
@@ -189,7 +188,7 @@ def main() -> int:
     load_env_file(args.env_file, override=True)
     settings = MentorSettings.from_env()
     store = MessageStore(settings.db_path)
-    runs = store.trade_candidate_runs("mentor_v4_trade_candidates")
+    runs = store.trade_candidate_runs("mentor_v")
     exchange = _public_exchange()
     cache: dict[tuple[str, str, str], pd.DataFrame] = {}
     trades: list[dict[str, Any]] = []
@@ -197,19 +196,24 @@ def main() -> int:
     now = pd.Timestamp.now(tz="UTC").floor("5min")
     for run in runs:
         result = run["result"]
-        symbol = _resolve_symbol(exchange, result.get("symbol"))
         for index, candidate in enumerate(result.get("trade_candidates") or [], start=1):
+            raw_symbol = candidate.get("symbol") or result.get("symbol")
+            symbol = candidate.get("resolved_symbol") or resolve_symbol(exchange, raw_symbol)
             base = {
                 "analysis_run_id": run["id"],
                 "message_id": run["message_id"],
                 "channel": run["channel_title"],
                 "prompt_version": run["prompt_version"],
-                "symbol_raw": result.get("symbol"),
+                "symbol_raw": raw_symbol,
                 "symbol": symbol,
                 "candidate_index": index,
                 "side": candidate.get("side"),
                 "analysis_created_at": run["created_at"],
             }
+            eligibility_reason = candidate.get("eligibility_reason")
+            if eligibility_reason in {"macro_context", "htf_rejected", "below_min_rr"}:
+                trades.append({**base, "outcome": eligibility_reason, "r": 0.0, "candidate": candidate})
+                continue
             if symbol is None:
                 trades.append({**base, "outcome": "symbol_unavailable", "r": 0.0})
                 continue
@@ -225,11 +229,15 @@ def main() -> int:
             evaluated = (
                 {"outcome": "no_candles", "r": 0.0}
                 if candles.empty
-                else _evaluate(candidate, candles)
+                else _evaluate(candidate, candles, args.min_rr)
             )
             trades.append({**base, **evaluated, "candidate": candidate})
 
-    testable = [t for t in trades if t["outcome"] not in {"not_testable", "invalid_geometry", "symbol_unavailable", "no_candles", "no_elapsed_window"}]
+    excluded = {
+        "not_testable", "invalid_geometry", "symbol_unavailable", "no_candles",
+        "no_elapsed_window", "below_min_rr", "macro_context", "htf_rejected",
+    }
+    testable = [t for t in trades if t["outcome"] not in excluded]
     realized = [t for t in testable if t["outcome"] not in {"open", "not_triggered"}]
     outcome_counts = Counter(str(t["outcome"]) for t in trades)
     realized_r = round(sum(float(t["r"]) for t in realized), 2)
@@ -239,11 +247,34 @@ def main() -> int:
     total_r = round(realized_r + open_mark_r, 2)
     risk_usd = args.equity * args.risk_pct / 100.0
     realized_wins = sum(t["outcome"] == "target" for t in realized)
+    def grouped(field: str) -> dict[str, dict[str, Any]]:
+        output: dict[str, dict[str, Any]] = {}
+        for value in sorted({str(t.get(field) or "unknown") for t in trades}):
+            members = [t for t in trades if str(t.get(field) or "unknown") == value]
+            member_testable = [t for t in members if t["outcome"] not in excluded]
+            member_realized = [t for t in member_testable if t["outcome"] not in {"open", "not_triggered"}]
+            wins = sum(t["outcome"] == "target" for t in member_realized)
+            group_r = round(sum(float(t["r"]) for t in member_realized), 2)
+            output[value] = {
+                "candidates": len(members),
+                "testable": len(member_testable),
+                "realized": len(member_realized),
+                "targets": wins,
+                "stops_or_ambiguous": sum(
+                    t["outcome"] in {"stop", "ambiguous_entry_bar", "ambiguous_exit_bar"}
+                    for t in member_realized
+                ),
+                "realized_r": group_r,
+                "win_rate_pct": round(wins / len(member_realized) * 100, 2) if member_realized else None,
+            }
+        return output
+
     summary = {
         "generated_at": datetime.now(timezone.utc).isoformat(),
         "window_max_days": args.max_days,
         "equity_assumption": args.equity,
         "risk_pct_assumption": args.risk_pct,
+        "min_rr": args.min_rr,
         "candidates": len(trades),
         "testable": len(testable),
         "realized": len(realized),
@@ -265,6 +296,8 @@ def main() -> int:
         "realized_pnl_usd_fixed_risk": round(realized_r * risk_usd, 2),
         "open_pnl_usd_fixed_risk": round(open_mark_r * risk_usd, 2),
         "potential_pnl_usd_fixed_risk": round(total_r * risk_usd, 2),
+        "by_side": grouped("side"),
+        "by_symbol": grouped("symbol"),
     }
     report = {"summary": summary, "trades": trades}
     output = Path(args.output)

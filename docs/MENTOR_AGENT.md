@@ -77,6 +77,16 @@ SL price/rule, TP price/rule and estimated RR. Exact values are inferred only
 when chart scale supports them. These candidates are research records and cannot
 execute orders.
 
+Prompt `mentor_v5_market_enriched` assigns a symbol to every candidate, treats
+dominance/index charts as context, and validates candidates with public Binance
+Futures candles. A candidate is eligible only when its 4H structure agrees with
+the trade direction, its 1H structure is aligned or neutral, numeric entry/SL/TP
+can be produced, and RR is at least `MENTOR_MIN_RR` (2 by default). Missing stops
+are placed beyond the latest confirmed 5m swing with an ATR buffer; a missing
+target falls back to the configured minimum RR. Every independently eligible
+candidate is retained: there is no overlap, correlation, or maximum-open-signal
+limit in this research stage. Binance order execution remains disabled.
+
 Requeue a few previously analyzed posts to compare the current prompt with older
 analysis versions:
 
@@ -84,9 +94,10 @@ analysis versions:
 python run_mentor_reanalyze.py --env-file .env.mentor --limit 5
 ```
 
-Evaluate numeric v4 candidates from their actual analysis timestamp against
+Evaluate the latest numeric candidates from their actual analysis timestamp against
 subsequent Binance Futures 5m candles. Same-candle ambiguity is counted as a
 conservative `-1R`; candidates without numeric entry/SL/TP are `not_testable`.
+The report also separates results by candidate symbol and long/short direction.
 
 ```bash
 python run_mentor_pnl.py --env-file .env.mentor --max-days 7 --equity 5000 --risk-pct 1
@@ -112,8 +123,8 @@ The default safety cap is 20 successful analyses per rolling 24 hours. Change
 
 ## Planned structured idea
 
-The analysis result will include source IDs, symbol, direction, setup status,
+The analysis result includes source IDs, per-candidate symbol, direction, setup status,
 entry zone, invalidation, chart targets, timeframes, expiry, confidence, missing
-facts, and evidence tied to text/images. A deterministic market-context stage
-will then download Binance candles and calculate candidate swings, SL, TP, RR,
-price deviation, and risk before asking for approval.
+facts, and evidence tied to text/images. The deterministic market-context stage
+downloads public Binance candles and calculates structure, candidate swings,
+SL, TP and RR. It does not submit orders.

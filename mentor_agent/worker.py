@@ -48,9 +48,11 @@ def _summary(output: dict) -> str:
         if target is None:
             target = candidate.get("take_profit_rule")
         lines.append(
-            f"Candidate {idx}: {str(candidate.get('side')).upper()} "
+            f"Candidate {idx}: {candidate.get('symbol') or result.get('symbol') or '?'} "
+            f"{str(candidate.get('side')).upper()} "
             f"entry={entry} SL={stop} TP={target} "
-            f"RR={candidate.get('estimated_rr')} status={candidate.get('status')}"
+            f"RR={candidate.get('estimated_rr')} status={candidate.get('status')} "
+            f"eligible={candidate.get('eligible')} reason={candidate.get('eligibility_reason')}"
         )
     return "\n".join(lines)
 
