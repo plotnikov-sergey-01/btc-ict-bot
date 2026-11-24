@@ -122,7 +122,8 @@ class MessageStore:
     def _connect(self) -> sqlite3.Connection:
         return sqlite3.connect(self.path)
 
-    def upsert(self, message: StoredMessage) -> None:
+    def upsert(self, message: StoredMessage) -> str:
+        """Store a message and report whether it is new, changed, or unchanged."""
         values = (
             message.chat_id,
             message.message_id,
@@ -143,6 +144,11 @@ class MessageStore:
             message.forward_date.isoformat() if message.forward_date else None,
         )
         with self._connect() as conn:
+            existing = conn.execute(
+                "SELECT content_fingerprint FROM telegram_messages "
+                "WHERE chat_id=? AND message_id=?",
+                (message.chat_id, message.message_id),
+            ).fetchone()
             conn.execute(
                 """
                 INSERT INTO telegram_messages (
@@ -170,6 +176,9 @@ class MessageStore:
                 """,
                 values,
             )
+        if existing is None:
+            return "new"
+        return "unchanged" if existing[0] == message.content_fingerprint else "changed"
 
     def count(self) -> int:
         with self._connect() as conn:
@@ -385,6 +394,24 @@ class MessageStore:
                 """
             ).fetchone()
         return int(row[0])
+
+    def analysis_job_counts(self) -> dict[str, int]:
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT status, COUNT(*) FROM mentor_analysis_jobs GROUP BY status"
+            ).fetchall()
+        return {str(status): int(count) for status, count in rows}
+
+    def cancel_pending_analysis_jobs(self) -> int:
+        """Cancel queued jobs without touching a job currently being processed."""
+        now = int(time.time())
+        with self._connect() as conn:
+            cursor = conn.execute(
+                "UPDATE mentor_analysis_jobs SET status='cancelled', "
+                "updated_at_epoch=? WHERE status='pending'",
+                (now,),
+            )
+            return int(cursor.rowcount)
 
     def recent_analysis_targets(self, limit: int) -> list[tuple[int, int]]:
         with self._connect() as conn:

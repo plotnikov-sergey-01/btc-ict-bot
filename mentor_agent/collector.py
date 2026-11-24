@@ -100,8 +100,8 @@ class MentorCollector:
             forward_from_name=getattr(forward, "from_name", None) if forward else None,
             forward_date=getattr(forward, "date", None) if forward else None,
         )
-        self.store.upsert(record)
-        if enqueue:
+        save_state = self.store.upsert(record)
+        if enqueue and save_state != "unchanged":
             self.store.enqueue_analysis(
                 chat_id=chat_id,
                 message_id=record.message_id,
@@ -109,11 +109,13 @@ class MentorCollector:
                 delay_sec=int(os.getenv("MENTOR_ANALYSIS_DELAY_SEC", "90")),
             )
         log.info(
-            "Saved channel=%s message=%s group=%s media=%s total=%s",
+            "Saved channel=%s message=%s group=%s media=%s state=%s queued=%s total=%s",
             record.channel_title,
             record.message_id,
             record.grouped_id,
             record.media_kind,
+            save_state,
+            enqueue and save_state != "unchanged",
             self.store.count(),
         )
 

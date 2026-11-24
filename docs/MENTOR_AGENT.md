@@ -94,6 +94,19 @@ analysis versions:
 python run_mentor_reanalyze.py --env-file .env.mentor --limit 5
 ```
 
+This command intentionally analyzes old posts again and sends a new Telegram
+notification for every queued post. It is not required during normal operation.
+Inspect the queue, or cancel pending historical reanalysis jobs while allowing
+the currently running job to finish:
+
+```bash
+python run_mentor_jobs.py --env-file .env.mentor
+python run_mentor_jobs.py --env-file .env.mentor --cancel-pending
+```
+
+Repeated Telegram edit/update events with an unchanged content fingerprint are
+stored but no longer requeued for analysis.
+
 Evaluate the latest numeric candidates from their actual analysis timestamp against
 subsequent Binance Futures 5m candles. Same-candle ambiguity is counted as a
 conservative `-1R`; candidates without numeric entry/SL/TP are `not_testable`.
